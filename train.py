@@ -11,6 +11,8 @@ import torchvision.transforms as transforms
 
 import common.train_model as train_model
 import models.hfnet as hfnet
+import numpy as np
+import random
 
 ## Read command line arguments
 parser = argparse.ArgumentParser()
@@ -26,6 +28,15 @@ args = parser.parse_args()
 ## Read config
 cp = configparser.ConfigParser()
 cp.read(args.config)
+
+seed = cp['Training'].getint('random_seed', 0)
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed(seed)
+torch.backends.cudnn.deterministic = True
+
 
 ## Initialize dataset & preprocessing
 transform = transforms.Compose([

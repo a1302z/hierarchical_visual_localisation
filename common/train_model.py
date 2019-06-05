@@ -3,6 +3,8 @@ import os
 import visdom
 import shutil
 import numpy as np
+import time
+from datetime import timedelta
 
 from common.utils import VisdomLinePlotter
 
@@ -23,11 +25,21 @@ def train_classifier(model, dataset, config, args, **kwargs):
     do_val = training_params.getboolean('validation', True)
     val_frequency = training_params.getint('val_frequency', 1)
     
+    #seed all randomness
+    seed = training_params.getint('random_seed')
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    
     ## Set up logging directory
-    base_dir = os.path.join('logs', kwargs['exp_name'])
-    i = 0
+    exp_name = kwargs['exp_name']
+    base_dir = os.path.join('logs', exp_name)
+    i = 1
     while os.path.isdir(base_dir):
-        base_dir = os.path.join('logs', kwargs['exp_name'], '_'+str(i))
+        exp_name = kwargs['exp_name']+ '_'+str(i)
+        base_dir = os.path.join('logs', exp_name)
         i += 1
     print('Logging to %s'%base_dir)
     os.mkdir(base_dir)
@@ -55,7 +67,7 @@ def train_classifier(model, dataset, config, args, **kwargs):
     use_visdom = logging_params.getboolean('visdom', False)
     if use_visdom:
         plotter = VisdomLinePlotter(
-            env_name='Classifier',
+            env_name='Classifier/'+exp_name,
             server = 'localhost' if 'hostname' not in kwargs else kwargs['hostname'], 
             port = 8097 if 'port' not in kwargs else kwargs['port'])
         plotter.add_plot('Loss', ['Train loss', 'Val Loss'], 'Loss')
@@ -70,6 +82,7 @@ def train_classifier(model, dataset, config, args, **kwargs):
         ## Validation
         if do_val and epoch % val_frequency == 0:
             print('Validation in progress')
+            t1 = time.time()
             model.eval()
             val_losses = []
             n_val = len(kwargs['val_set'])
@@ -83,10 +96,13 @@ def train_classifier(model, dataset, config, args, **kwargs):
                     print('\t%d/%d samples (Loss: %.3f)'%(i, n_val, val_loss.item()))
             plotter.plot('Loss', 'Val loss', epoch, np.mean(val_losses))
             model.train()
+            t2 = time.time()
+            print('\tValidation time: %s'%str(timedelta(seconds=t2-t1)))
             
             
         ## Iterate over training data    
         print('Training')
+        t1 = time.time()
         for i, (data, target) in enumerate(dataset):
             if i > n_samples: ##overfit
                 break
@@ -102,9 +118,34 @@ def train_classifier(model, dataset, config, args, **kwargs):
                 print('\t%d/%d samples (Loss: %.3f)'%(i, n_samples, loss.item()))
                 if use_visdom:
                     plotter.plot('Loss', 'Train loss', float(epoch) + float(i)/float(n_samples), loss.item())
+        t2 = time.time()
+        print('\tTraining time: %s'%str(timedelta(seconds=t2-t1)))
                     
-            
-                    
+    ## Eval model result        
+    if do_val and epoch % val_frequency == 0:
+        print('Validation in progress')
+        t1 = time.time()
+        model.eval()
+        val_losses = []
+        correct = 0
+        n_val = len(kwargs['val_set'])
+        for i, (data, target) in enumerate(kwargs['val_set']):
+            if CUDA:
+                data = data.cuda()
+                target = target.cuda()
+            prediction = model(data.unsqueeze(0))
+            val_loss = loss_fn(prediction, target.unsqueeze(0))
+            val_losses.append(val_loss.item())
+            if prediction.argmax() == target.item():
+                correct += 1
+            if i % (n_val//log_division) == 0:
+                print('\t%d/%d samples (Loss: %.3f)'%(i, n_val, val_loss.item()))
+            plotter.plot('Loss', 'Val loss', n_epochs, np.mean(val_losses))
+        model.train()
+        t2 = time.time()
+        print('\tValidation time: %s'%str(timedelta(seconds=t2-t1)))
+        print('Final performance: %d/%d (%.1f%%) correctly classified'%(correct, n_val, 100.0*(float(correct)/float(n_val))))
+    
     ## Save training
     save_checkpoint(epoch, n_epochs, model, optim, base_dir)
             
