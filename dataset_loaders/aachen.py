@@ -5,8 +5,7 @@ from torch.utils import data
 import numpy as np
 import ntpath
 import random
-from common.pose_utils import process_poses_quaternion
-import transforms3d.quaternions as txq
+from dataset_loaders.pose_utils import process_poses_quaternion
 from dataset_loaders.utils import load_image, single_channel_loader
 import os
 
@@ -89,12 +88,15 @@ class AachenDayNight(data.Dataset):
                 aug_path = os.path.join(self.data_path, 'AugmentedNightImages_v2', img_name)
                 assert os.path.isfile(aug_path), 'Augmented file not found'
                 self.night_img_paths.append(aug_path)
-                
-        for i in range(num_points):
-            if i % self.train_split == 0:
-                self.val_idcs.append(i)
-            else:
-                self.train_idcs.append(i)
+        if train_split > 0:        
+            for i in range(num_points):
+                if i % self.train_split == 0:
+                    self.val_idcs.append(i)
+                else:
+                    self.train_idcs.append(i)
+        else:
+            self.train_idcs = [i for i in range(num_points)]
+            self.val_idcs = self.train_idcs
         if verbose:
             print('Read %d points'%self.poses.shape[0])
             print('%d training points\n%d validation points'%(len(self.train_idcs), len(self.val_idcs)))
@@ -164,18 +166,24 @@ class AachenDayNight(data.Dataset):
         self.poses = process_poses_quaternion(self.poses[:,:3], self.poses[:,3:], mean_t, std_t, np.eye(3), np.zeros(3), np.ones(1))
         if verbose:
             print('Process poses: %s'%str(self.poses.shape))
+        self.len = self.__len__()
+        if verbose:
+            print('Length of dataset: %d'%self.len)
             
     def __len__(self):
         factor = 2 if self.night_augmentation else 1
-        return len(self.poses)*factor
+        if self.train:
+            return len(self.train_idcs)*factor
+        else:
+            return len(self.val_idcs)*factor
         
             
             
     def __getitem__(self, index):
         augmentation_index = 0
         if self.night_augmentation:
-            augmentation_index = index // len(self.poses)
-            index = index % len(self.poses)
+            augmentation_index = index // self.len
+            index = index % self.len
         elif self.only_augmentation:
             augmentation_index = 1
         inps = []
@@ -219,7 +227,7 @@ class AachenDayNight(data.Dataset):
                 outs.append(img)
             else:
                 raise NotImplementedError('Not implemented yet')
-        return inps[0] if len(inps) <= 1 else tuple(inps), outs[0] if len(outs) <= 1 else outs
+        return inps[0] if len(inps) == 1 else tuple(inps), outs[0] if len(outs) == 1 else outs
             
 if __name__ == '__main__':
     loader = AachenDayNight('../data/deepslam_data/AachenDayNight/', True, verbose=True)
