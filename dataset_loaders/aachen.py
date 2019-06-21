@@ -230,9 +230,9 @@ class AachenDayNight(data.Dataset):
         return inps[0] if len(inps) == 1 else tuple(inps), outs[0] if len(outs) == 1 else outs
             
 if __name__ == '__main__':
-    loader = AachenDayNight('../data/deepslam_data/AachenDayNight/', True, verbose=True)
+    loader = AachenDayNight('../data/AachenDayNight/', True, verbose=True)
     print(len(loader))
-    loader = AachenDayNight('../data/deepslam_data/AachenDayNight/', False, input_types=['img', 'label', 'point_cloud'], verbose = True, night_augmentation=True)
+    loader = AachenDayNight('../data/AachenDayNight/', False, input_types=['img', 'label', 'point_cloud'], verbose = True, night_augmentation=True, train_split=-1)
     print(len(loader))
     """
     for i, (inp, target) in enumerate(loader):
@@ -241,10 +241,11 @@ if __name__ == '__main__':
         if i > len(loader):
             break
     """
-    x, c = loader[0]
-    pose_stats_filename = os.path.join('../data/deepslam_data/AachenDayNight/', 'pose_stats.txt')
+    x, c = loader[1000]
+    pose_stats_filename = os.path.join('../data/AachenDayNight/', 'pose_stats.txt')
     mean_t, std_t = np.loadtxt(pose_stats_filename)
     c = c[:3]*std_t +mean_t
+    print('Position: %s'%str(c))
     print('len inps: %d'%len(x))
     for x_i in x:
         if type(x_i) is np.ndarray:
@@ -265,3 +266,9 @@ if __name__ == '__main__':
     ax.set_ylim3d(-thresh,thresh)
     ax.set_zlim3d(-thresh,thresh)
     plt.show()
+    
+    
+    loader = AachenDayNight('../data/AachenDayNight', True, train_split=-1,seed=0,#transform=transform,
+                                input_types='img', #output_types=[],
+                                real=True, verbose=False)
+    print(loader[4000][1])

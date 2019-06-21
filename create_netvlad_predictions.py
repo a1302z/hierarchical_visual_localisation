@@ -36,7 +36,7 @@ if CUDA:
 
 ## Init dataset
 transform = transforms.Compose([
-    #transforms.Resize(args.resize),
+    transforms.Resize(args.resize),
     transforms.CenterCrop(args.resize),
     transforms.ToTensor()])
 dataset = aachen.AachenDayNight(args.data_path, True, train_split=-1,seed=0,input_types='img', output_types=[], real=True,transform=transform, verbose=False, overfit=args.overfit)
@@ -47,7 +47,7 @@ predictions = []
 
 out_file_name = os.path.join('data', args.out_file+'.hdf5')
 out_file = h5py.File(out_file_name, "w")
-width = 2230273
+width = model(dataset[0][0].unsqueeze(0).cuda()).detach().cpu().squeeze(0).size()[0] + 1
 results = out_file.create_dataset("results", (len(dataloader), width), compression="gzip")
 times = []
 for i, (data, _) in enumerate(dataloader):
@@ -65,13 +65,13 @@ for i, (data, _) in enumerate(dataloader):
     pred = pred.squeeze(0).detach().cpu().numpy()
     sh = pred.shape[0]
     #print(pred.shape)
-    if sh >= width:
+    if sh + 1 > width:
         raise RuntimeError('Prediction larger than hdf5')
     results[i,0] = sh
     results[i, 1:sh+1] = pred
     times.append(time.time()-t1)
     
-
+out_file.close()
 """
 verification = np.load('data/test.npy', allow_pickle=True)
 print(verification.shape)
