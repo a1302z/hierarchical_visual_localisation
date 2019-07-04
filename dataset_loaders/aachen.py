@@ -60,6 +60,8 @@ class AachenDayNight(data.Dataset):
         lines = lines[:num_points+3]
         lines[3:] = [x.strip().split(' ') for x in lines[3:]]
         self.img_paths = []
+        self.img_nums = {}
+        self.ids_imgs = {}
         poses = []
         for i in range(3, len(lines)):
             l = lines[i]
@@ -67,6 +69,15 @@ class AachenDayNight(data.Dataset):
             c = [float(x) for x in l[6:9]]
             poses.append(np.asarray(c+q))
             self.img_paths.append(os.path.join('images_upright', l[0]))
+            actual_index = int(l[0][3:].split('.')[0])
+            self.img_nums[actual_index] =  i-3
+            self.ids_imgs[i-3] = actual_index
+            #if verbose:
+            #    print('Index: %d\t Cleaned index: %d\t Path: %s'%(i-3, actual_index, l[0]))
+        if verbose:
+            for i in range(len(lines)-3):
+                if i not in self.img_nums.keys():
+                    print('%d not in actual indices'%i)
         self.poses = np.vstack(poses)
         del poses
         self.sem_labels = None
@@ -178,6 +189,12 @@ class AachenDayNight(data.Dataset):
             return len(self.val_idcs)*factor
         
             
+    def get_by_img_id(self, img_id):
+        index = self.img_nums[img_id]
+        return self[index]
+    
+    def get_img_id(self, index):
+        return self.ids_imgs[index]
             
     def __getitem__(self, index):
         augmentation_index = 0
