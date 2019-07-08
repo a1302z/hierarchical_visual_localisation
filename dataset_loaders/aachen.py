@@ -189,6 +189,9 @@ class AachenDayNight(data.Dataset):
             return len(self.val_idcs)*factor
         
             
+    def get_actual_index(self, index):
+        return self.img_nums[index]
+    
     def get_by_img_id(self, img_id):
         index = self.img_nums[img_id]
         return self[index]

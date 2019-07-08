@@ -8,20 +8,21 @@ import numpy as np
 import torch
 from torchvision import transforms
 import os
-import h5py
+import sqlite3
 import time
 from datetime import timedelta
+import read_model as rm
 
 import models.netvlad_vd16_pitts30k_conv5_3_max_dag as netvlad
-import dataset_loaders.aachen as aachen
+from dataset_loaders.utils import load_image
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--save_dir', default='data', help='Specify directory to save NetVLAD prediction')
 parser.add_argument('--model_path', default='data/teacher_models/netvlad_pytorch/vd16_pitts30k_conv5_3_max_dag.pth', help='Path to trained NetVLAD weights')
-parser.add_argument('--data_path', default='data/AachenDayNight', help='Specify path to AachenDayNight data')
+parser.add_argument('--data_path', default='data/AachenDayNight/images_upright/', help='Specify path to AachenDayNight data')
 parser.add_argument('--out_file', default='test', help='Specify name for output file')
-parser.add_argument('--resize', type=int, default=1063, help='Size to resize and crop input images')
+parser.add_argument('--resize', type=int, default=256, help='Size to resize and crop input images')
 parser.add_argument('--overfit', type=int, default=None, help='Only use n data points')
 args = parser.parse_args()
 
@@ -39,48 +40,50 @@ transform = transforms.Compose([
     transforms.Resize(args.resize),
     transforms.CenterCrop(args.resize),
     transforms.ToTensor()])
-dataset = aachen.AachenDayNight(args.data_path, True, train_split=-1,seed=0,input_types='img', output_types=[], real=True,transform=transform, verbose=False, overfit=args.overfit)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=1)
 
-print('%d datapoints'%len(dataloader))
+c = sqlite3.connect(args.out_file+'.db')
+try:
+    res = c.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='global_features';")
+    if(res.fetchone()[0] == 1):
+        print('Database already exists - Please either delete or use other name')
+        exit()
+    else:
+        c.execute('''CREATE TABLE global_features (image_id INTEGER PRIMARY_KEY NOT NULL, cols INTEGER, data BLOB)''')
+except sqlite3.Error as e:
+    print(e)
+    exit()
+
+print('Loading image information')
+images = rm.read_images_text('data/images.txt')
+get_img = lambda i: load_image(args.data_path+images[i].name)
+
+print('Found %d images'%len(images))
 predictions = []
 
-out_file_name = os.path.join('data', args.out_file+'.hdf5')
-out_file = h5py.File(out_file_name, "w")
-width = model(dataset[0][0].unsqueeze(0).cuda()).detach().cpu().squeeze(0).size()[0] + 1
-results = out_file.create_dataset("results", (len(dataloader), width), compression="gzip")
 times = []
-for i, (data, _) in enumerate(dataloader):
-    if i % 20 == 0:
-        print('%d/%d'%(i, len(dataloader)), end='\t')
+model.eval()
+print('Start processing images')
+for cnt, i in enumerate(images):
+    if cnt % len(images) // 10 == 0:
+        c.commit()
+        print('%4d/%d'%(i, len(images)), end='\t')
         if len(times) > 0:
-            t = np.median(times) * (len(dataloader)-i)
+            t = np.median(times) * (len(images)-i)
             print("Estimated remaining time: %s"%str(timedelta(seconds=t)))
         else:
             print('')
     t1 = time.time()
+    data = transform(get_img(i)).unsqueeze(0)
     if CUDA:
         data = data.cuda()
     pred = model(data)
     pred = pred.squeeze(0).detach().cpu().numpy()
     sh = pred.shape[0]
-    #print(pred.shape)
-    if sh + 1 > width:
-        raise RuntimeError('Prediction larger than hdf5')
-    results[i,0] = sh
-    results[i, 1:sh+1] = pred
+    c.execute("INSERT INTO global_features VALUES (?,?,?)", [i, sh, pred])
     times.append(time.time()-t1)
-    
-out_file.close()
-"""
-verification = np.load('data/test.npy', allow_pickle=True)
-print(verification.shape)
-for i, v in enumerate(verification):
-    print(v.shape)
-    print(np.linalg.norm(v-predictions[i]))
-"""    
-        
-        
-        
+    if args.overfit is not None and cnt > args.overfit:
+        break
+
+c.commit()    
+c.close()
 print('Fin')
-    
