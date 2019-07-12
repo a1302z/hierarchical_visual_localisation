@@ -42,7 +42,7 @@ parser.add_argument('--n_iter', type=int, default=5000, help='Number of iteratio
 parser.add_argument('--reproj_error', type=float, default=8., help='Reprojection error of PnP-RANSAC loop')
 parser.add_argument('--min_inliers', type=int, default=10, help='minimal number of inliers after PnP-RANSAC')
 parser.add_argument('--n_neighbors', default=2, type=int, help='How many global neighbors are used')
-parser.add_argument('--verification', action='store_true', help='Use given dataset to evaluate error on own images. Verifies that pipeline works')
+parser.add_argument('--verify', action='store_true', help='Use given dataset to evaluate error on own images. Verifies that pipeline works')
 parser.add_argument('--dataset_dir', default='data/AachenDayNight/images_upright/query/', help='Dataset directory')
 parser.add_argument('--overfit', default=None, type=int, help='Limit number of queries')
 parser.add_argument('--out_file', type=str, default='aachen_eval_.txt', help='Name of output file')
@@ -178,7 +178,7 @@ print_column_entry('Read {} images'.format(len(images)), time_to_str(t))
 get_img = lambda i: np.array(load_image('data/AachenDayNight/images_upright/'+images[i].name))
 database_cursor = get_cursor('data/AachenDayNight/aachen.db')
 if args.local_method is 'Colmap':
-    query_cursor = get_cursor('data/queries.db')
+    query_cursor = get_cursor('data/AachenDayNight/aachen.db') if args.verify else get_cursor('data/queries.db')
 ##create image clusters
 t = time.time()
 img_cluster = {}
@@ -216,7 +216,11 @@ low_res_transform = transforms.Compose([transforms.Resize(args.global_resolution
 setup_time = time.time() - setup_time
 
 t = time.time()
-query_images = get_files(args.dataset_dir, '*.jpg')
+if args.verify:
+    query_images = [os.path.join(args.dataset_dir, images[i].name) for i in images]
+    query_image_ids = [i for i in images]
+else:
+    query_images = get_files(args.dataset_dir, '*.jpg')
 if args.overfit is not None:
     query_images = query_images[:args.overfit]
 t = time.time() - t
@@ -276,12 +280,33 @@ else:
     raise NotImplementedError('Nearest Method not implemented')
 t = time.time() - t
 print_column_entry('Nearest neighbors for all queries', time_to_str(t))
+
+
+## delete data intense variables that are not needed anymore
+del global_features, query_global_desc, model
+
+
+
+## Local features matching and pose retrieval
+
 image_times = []
+if args.verify:
+    errors = []
 out_file = open(args.out_file, 'w')
 print('Local feature matching and pose retrieval')
 for query_id, query_name in enumerate(query_images):
+    
+    ## Make sure we have camera parameters.
+    if args.verify:
+        query_path = images[query_image_ids[query_id]].name
+    else:
+        query_path = os.path.join(*os.path.normpath(query_name).split(os.sep)[-4:])
+    if query_path not in camera_matrices:
+        continue
+        
     individual_image_time = time.time()
     print_column_entry('Processing query image {}/{}'.format(query_id+1, len(query_images)), 'Expected remaining time: {}'.format(time_to_str(np.median(image_times)*(len(query_images)-query_id))) if query_id > 0 else '')
+    print_column_entry('Query path', query_name)
     t = time.time()
     cluster_query = [img_cluster[image_ids[indices[query_id][0]]]]
     cluster_orig_ids = [image_ids[indices[query_id][0]]]
@@ -322,36 +347,41 @@ for query_id, query_name in enumerate(query_images):
     matched_kpts_cv = []
     matched_pts = []
     matcher = cv2.BFMatcher.create(cv2.NORM_L2)
+    pt_id_list = []
+    data_descs = []
     for c in cluster_query:
         for img in c:
             db_id = img # get_img_id_dataset(database_cursor, img)
             img_name = images[db_id].name
             valid = images[db_id].point3D_ids > 0 
-            if args.local_method is 'Colmap':
-                data_kpts, data_desc = get_kpts_desc(database_cursor, db_id)
-                data_kpts = kpts_to_cv(data_kpts[valid[:data_kpts.shape[0]]] - 0.5)
-            else:
-                raise NotImplementedError('Local method not implemented in matching')
+            data_kpts, data_desc = get_kpts_desc(database_cursor, db_id)
+            data_kpts = kpts_to_cv(data_kpts[valid[:data_kpts.shape[0]]] - 0.5)
             pt_ids = images[db_id].point3D_ids[valid]
+            pt_id_list.append(pt_ids)
             data_desc = data_desc[valid[:data_desc.shape[0]]]
+            #print('Point Ids: {}\t Desc shape: {}'.format(len(pt_ids), data_desc.shape[0]))
+            data_descs.append(data_desc)
 
-            matches = matcher.knnMatch(data_desc, query_desc, k=2)
-            good = []
-            for i,(m,n) in enumerate(matches):
-                if m.distance < args.ratio_thresh*n.distance:
-                    good.append(m)
-            matched_kpts_cv += [query_kpts[i] for i in [g.trainIdx for g in good]]
-            matched_pts += [pt_ids[i] for i in [g.queryIdx for g in good]]
-            #print('.',end='')
+    data_descs = np.concatenate(data_descs)
+    pt_id_list = np.concatenate(pt_id_list)
+    matches = matcher.knnMatch(data_descs,query_desc,k=2)
+    good = []
+    for i,(m,n) in enumerate(matches):
+        if m.distance < args.ratio_thresh*n.distance:
+            good.append(m)
+
+    matched_kpts_cv = [query_kpts[i] for i in [g.trainIdx for g in good]]
+    matched_pts = [pt_id_list[i] for i in [g.queryIdx for g in good]]
+
     t = time.time() - t
     matched_pts_xyz = np.stack([points3d[i].xyz for i in matched_pts])
     matched_keypoints = np.vstack([np.array([x.pt[0], x.pt[1]]) for x in matched_kpts_cv])
+    print_column_entry(' - Number of matched points', matched_keypoints.shape[0])
     print_column_entry(' - Finished matching', time_to_str(t))
     
     
     ## Calculate pose
     t = time.time()
-    query_path = os.path.join(*os.path.normpath(query_name).split(os.sep)[-4:])
     cm = camera_matrices[query_path]
     camera_matrix = cm['cameraMatrix']
     distortion_coeff = cm['rad_dist']
@@ -380,17 +410,35 @@ for query_id, query_name in enumerate(query_images):
         w_T_query = np.linalg.inv(query_T_w)
     
     name = os.path.split(query_name)[-1]
-    if not success:
-        print_column_entry(' - WARNING','Localization not successful!')
-        out_file.write('{} {} {} {} {} {} {} {}\n'.format(name,0,0,0,0,0,0,0))
+    position = w_T_query[:3, 3]
+    print_column_entry(' - Calculated position', position)
+    
+    if args.verify:
+        gt = colmap_image_to_pose(images[query_image_ids[query_id]])[:3,3]
+        error = np.linalg.norm(position-gt)
+        error_str = '%.1f m'%error if error > 1e-1 else '%.1f cm'%(100.0*error)
+        errors.append(error)
+        print_column_entry(' - Groundtruth', gt)
+        print_column_entry(' - Error', error_str)
+        out_file.write('{} Error: {} CalcPos: {}\n'.format(name, error, position))
     else:
-        name = os.path.split(query_name)[-1]
-        position = w_T_query[:3, 3]
-        quat = rotmat2qvec(w_T_query[:3,:3])
-        out_file.write('{} {} {} {} {} {} {} {}\n'.format(name, quat[0], quat[1], quat[2], quat[3], position[0], position[1], position[2]))
-        print_column_entry(' - Calculated position', position)
+        if not success:
+            print_column_entry(' - WARNING','Localization not successful!')
+            out_file.write('{} {} {} {} {} {} {} {}\n'.format(name,0,0,0,0,0,0,0))
+        else:
+            quat = rotmat2qvec(w_T_query[:3,:3])
+            out_file.write('{} {} {} {} {} {} {} {}\n'.format(name, quat[0], quat[1], quat[2], quat[3], position[0], position[1], position[2]))
     
     individual_image_time = time.time() - individual_image_time 
     print_column_entry('Finished image {}/{}'.format(query_id+1, len(query_images)), time_to_str(individual_image_time))
     image_times.append(individual_image_time)
 out_file.close()
+print('Stats')
+print_column_entry('Setup time', time_to_str(setup_time))
+print_column_entry('Average time per image', time_to_str(np.mean(image_times)))
+print_column_entry('Median time per image', time_to_str(np.median(image_times)))
+print_column_entry('Max image time', time_to_str(np.max(image_times)))
+if args.verify:
+    print_column_entry('Mean error', '{:.4f} m'.format(np.mean(errors)))
+    print_column_entry('Median error', '{:.4f} m'.format(np.median(errors)))
+    print_column_entry('Max error', '{:.4f} m'.format(np.max(errors)))

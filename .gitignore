@@ -6,3 +6,5 @@ logs/*
 *.db*
 slurm/*
 slurm*
+aachen_eval*
+*.txt
