@@ -8,4 +8,4 @@ slurm/*
 slurm*
 aachen_eval*
 *.txt
-submissions/*
+results/*

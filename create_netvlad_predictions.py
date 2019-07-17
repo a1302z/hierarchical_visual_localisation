@@ -11,7 +11,7 @@ import os
 import sqlite3
 import time
 from datetime import timedelta
-import read_model as rm
+import dataset_loaders.txt_to_db import get_images
 
 import models.netvlad_vd16_pitts30k_conv5_3_max_dag as netvlad
 from dataset_loaders.utils import load_image
@@ -21,7 +21,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--save_dir', default='data', help='Specify directory to save NetVLAD prediction')
 parser.add_argument('--model_path', default='data/teacher_models/netvlad_pytorch/vd16_pitts30k_conv5_3_max_dag.pth', help='Path to trained NetVLAD weights')
 parser.add_argument('--data_path', default='data/AachenDayNight/images_upright/', help='Specify path to AachenDayNight data')
-parser.add_argument('--out_file', default='test', help='Specify name for output file')
+parser.add_argument('--out_file', default='data/netvlad', help='Specify name for output file')
 parser.add_argument('--resize', type=int, default=256, help='Size to resize and crop input images')
 parser.add_argument('--overfit', type=int, default=None, help='Only use n data points')
 args = parser.parse_args()
@@ -54,7 +54,7 @@ except sqlite3.Error as e:
     exit()
 
 print('Loading image information')
-images = rm.read_images_text('data/images.txt')
+images = get_images()
 get_img = lambda i: load_image(args.data_path+images[i].name)
 
 print('Found %d images'%len(images))

@@ -28,17 +28,21 @@ from fnmatch import fnmatch
 import nearpy
 from pyquaternion import Quaternion
 import warnings
+import transforms3d.quaternions as txq
 
 from common.local_matching import Matcher
-from dataset_loaders.txt_to_db import read_database
+from dataset_loaders.txt_to_db import get_images, get_points
 from dataset_loaders.utils import load_image
 from dataset_loaders.pose_utils import quaternion_angular_error
 import models.netvlad_vd16_pitts30k_conv5_3_max_dag as netvlad
+import models.demo_superpoint as superpoint
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--global_method', default='NetVLAD', choices=['NetVLAD',], help='Which method to use for global features')
-parser.add_argument('--local_method', default='Colmap', choices=['SiftOpenCV', 'Colmap'], help='Which method to use for local features')
+parser.add_argument('--local_method', default='Colmap', choices=['Colmap', 'Superpoint'], help='Which method to use for local features')
+parser.add_argument('--superpoint_database', default='data/superpoint.db', help='If superpoint is used we need the database with precalculated descriptors')
+parser.add_argument('--superpoint_model_path', default='data/teacher_models/superpoint_v1.pth', help='Path to pretrained superpoint model')
 parser.add_argument('--nearest_method', default='LSH', type = str, choices=['exact', 'LSH'], help='Which method to use to find nearest global neighbors')
 parser.add_argument('--local_matching_method', default='approx', type=str, choices=['exact', 'approx'], help='How local features are matched. Approx only considers direction of feature vector but is much faster.')
 parser.add_argument('--global_resolution', default=256, type=int, help='Resolution on which nearest global neighbors are calculated')
@@ -182,6 +186,9 @@ def print_config(args):
     print_column_entry('Evaluation image directory', args.dataset_dir)
     print_column_entry('Global method', args.global_method)
     print_column_entry('Local method', args.local_method)
+    if args.local_method == 'Superpoint':
+        print_column_entry(' - Database', args.superpoint_database)
+        print_column_entry(' - Model', args.superpoint_model_path)
     print_column_entry('Nearest neighbor method', args.nearest_method)
     if args.nearest_method == 'LSH':
         print_column_entry(' - hash buckets', 2**args.buckets)
@@ -202,7 +209,8 @@ def setup(args):
     print('Setup')
     setup_time = time.time()
     t = time.time()
-    images, points3d = read_database()
+    images = get_images()
+    points3d = get_points()
     t = time.time() - t
     print_column_entry('Read {} images and {} 3d points'.format(len(images), len(points3d)), time_to_str(t))
     #get_img = lambda i: np.array(load_image('data/AachenDayNight/images_upright/'+images[i].name))
@@ -351,6 +359,10 @@ Matches local features of query to cluster images and calculates 6dof pose
 """
 def local_matching(args, points3d, images, database_cursor, query_cursor, img_cluster, camera_matrices, query_images, query_image_ids, indices, image_ids, out_file):
     ## Local features matching and pose retrieval
+    if args.local_method == 'Superpoint':
+        extractor = superpoint.SuperPointFrontend(weights_path=args.superpoint_model_path,
+                          nms_dist=4, conf_thresh=0.015, nn_thresh=.7, cuda=torch.cuda.is_available())
+        superpoint_cursor = sqlite3.connect(args.superpoint_database).cursor()
     image_times = []
     #if args.verify:
     errors = []
@@ -401,6 +413,11 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             query_img_id = get_img_id(query_cursor, test_query_path)
             query_kpts, query_desc = get_kpts_desc(query_cursor, query_img_id)
             query_kpts = kpts_to_cv(query_kpts)
+        elif args.local_method == 'Superpoint':
+            cv_img = cv2.imread(query_name, 0).astype(np.float32)/255.0
+            kpts, query_desc, _ = extractor.run(cv_img)
+            query_desc = query_desc.T
+            query_kpts = kpts_to_cv(kpts.T)
         else:
             raise NotImplementedError('Local feature extraction method not implemented')
         t = time.time() - t
@@ -412,7 +429,6 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         matched_kpts_cv = []
         matched_pts = []
         #matcher = cv2.BFMatcher.create(cv2.NORM_L2)
-        pt_id_list = []
         data_descs = []
         if 'approx' in mm:
             query_desc = matcher.to_unit_vector(query_desc, cuda)
@@ -420,11 +436,22 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             for img in c:
                 img_name = images[img].name
                 valid = images[img].point3D_ids > 0 
-                data_kpts, data_desc = get_kpts_desc(database_cursor, img)
-                data_kpts = kpts_to_cv(data_kpts[valid[:data_kpts.shape[0]]] - 0.5)
                 pt_ids = images[img].point3D_ids[valid]
-                pt_id_list.append(pt_ids)
-                data_desc = data_desc[valid[:data_desc.shape[0]]]
+                if args.local_method == 'Colmap':
+                    data_desc = descriptors_from_colmap_db(database_cursor, img)
+                    #data_kpts = kpts_to_cv(data_kpts[valid[:data_kpts.shape[0]]] - 0.5)
+                    data_desc = data_desc[valid[:data_desc.shape[0]]]
+                elif args.local_method == 'Superpoint':
+                    path_to_img = 'data/AachenDayNight/images_upright/'+img_name
+                    cv_img = cv2.imread(path_to_img, 0).astype(np.float32)/255.0
+                    data_kpts = keypoints_from_colmap_db(database_cursor, int(img))
+                    data_kpts = data_kpts[valid[:data_kpts.shape[0]]] - 0.5
+                    _, data_desc, _ = extractor.run(cv_img, points=data_kpts)
+                    data_desc = data_desc.T
+                    ##database version
+                    #superpoint_cursor.execute('SELECT cols, desc FROM local_features WHERE image_id==?;',(int(img),))
+                    #cols, desc = next(superpoint_cursor)
+                    #data_desc = np.frombuffer(desc, dtype=np.float32).reshape(cols, 256)
                 if 'approx' in mm:
                     data_desc = matcher.to_unit_vector(data_desc, cuda)
                 matches = matcher.match(data_desc,query_desc)

@@ -1,5 +1,5 @@
 import sqlite3
-import read_model as rm
+import dataset_loaders.read_model as rm
 import numpy as np
 
 def create_database(database_name='data/images_points.db'):
@@ -38,9 +38,8 @@ def create_database(database_name='data/images_points.db'):
     c.close()
     print('Finished')
     
-def read_database(path='data/images_points.db'):
+def get_images(path='data/images_points.db'):
     images = {}
-    points = {}
     c = sqlite3.connect(path).cursor()
     for row in c.execute('SELECT image_id, qvec, tvec, camera_id, name, data_cols, xys, point3D_ids FROM images;'):
         image_id = row[0]
@@ -52,6 +51,11 @@ def read_database(path='data/images_points.db'):
                     id=image_id, qvec=qvec, tvec=tvec,
                     camera_id=row[3], name=row[4],
                     xys=xys, point3D_ids=point3D_ids)
+    return images
+
+def get_points(path='data/images_points.db'):
+    points = {}
+    c = sqlite3.connect(path).cursor()
     for row in c.execute('SELECT point_id, xyz, image_id_cols, image_ids FROM points3d;'):
         point3D_id = row[0]
         xyz = np.frombuffer(row[1], dtype=np.float64).reshape(3)
@@ -59,7 +63,7 @@ def read_database(path='data/images_points.db'):
         points[point3D_id] = rm.Point3D(id=point3D_id, xyz=xyz, rgb=None,
                                                error=None, image_ids=image_ids,
                                                point2D_idxs=None)
-    return images, points
+    return points
     
     
 if __name__ == '__main__':
