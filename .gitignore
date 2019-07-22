@@ -9,3 +9,4 @@ slurm*
 aachen_eval*
 *.txt
 results/*
+figures/*

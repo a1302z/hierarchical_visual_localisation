@@ -16,7 +16,6 @@ import argparse
 import os
 import numpy as np
 import torch
-from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from torchvision import transforms
@@ -25,12 +24,11 @@ import time
 from collections import namedtuple
 import sqlite3
 from fnmatch import fnmatch
-import nearpy
 from pyquaternion import Quaternion
 import warnings
 import transforms3d.quaternions as txq
 
-from common.local_matching import Matcher
+from common.feature_matching import LocalMatcher, GlobalMatcher, to_unit_vector
 from dataset_loaders.txt_to_db import get_images, get_points
 from dataset_loaders.utils import load_image
 from dataset_loaders.pose_utils import quaternion_angular_error
@@ -43,7 +41,7 @@ parser.add_argument('--global_method', default='NetVLAD', choices=['NetVLAD',], 
 parser.add_argument('--local_method', default='Colmap', choices=['Colmap', 'Superpoint'], help='Which method to use for local features')
 parser.add_argument('--superpoint_database', default='data/superpoint.db', help='If superpoint is used we need the database with precalculated descriptors')
 parser.add_argument('--superpoint_model_path', default='data/teacher_models/superpoint_v1.pth', help='Path to pretrained superpoint model')
-parser.add_argument('--nearest_method', default='LSH', type = str, choices=['exact', 'LSH'], help='Which method to use to find nearest global neighbors')
+parser.add_argument('--nearest_method', default='approx', type = str, choices=['exact', 'LSH', 'approx'], help='Which method to use to find nearest global neighbors')
 parser.add_argument('--local_matching_method', default='approx', type=str, choices=['exact', 'approx'], help='How local features are matched. Approx only considers direction of feature vector but is much faster.')
 parser.add_argument('--global_resolution', default=256, type=int, help='Resolution on which nearest global neighbors are calculated')
 parser.add_argument('--ratio_thresh', type=float, default=.75, help='Threshold for local feature matching in range [0.0, 1.0]. The higher it is the less similar matches have to be.')
@@ -57,6 +55,8 @@ parser.add_argument('--dataset_dir', default='data/AachenDayNight/images_upright
 parser.add_argument('--overfit', default=None, type=int, help='Limit number of queries')
 parser.add_argument('--out_file', type=str, default='aachen_eval_.txt', help='Name of output file')
 
+
+## Taken from original hfnet repository
 def qvec2rotmat(qvec):
     return np.array([
         [1 - 2 * qvec[2]**2 - 2 * qvec[3]**2,
@@ -69,6 +69,7 @@ def qvec2rotmat(qvec):
          2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
         1 - 2 * qvec[1]**2 - 2 * qvec[2]**2]])
 
+## Taken from original hfnet repository
 def rotmat2qvec(R):
     Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flat
     K = np.array([
@@ -82,6 +83,7 @@ def rotmat2qvec(R):
         qvec *= -1
     return qvec
 
+## Taken from original hfnet repository
 def colmap_image_to_pose(image):
     im_T_w = np.eye(4)
     im_T_w[:3, :3] = qvec2rotmat(image.qvec)
@@ -91,6 +93,7 @@ def colmap_image_to_pose(image):
 def get_cursor(name):
     return sqlite3.connect(name).cursor()
 
+## Taken from original hfnet repository
 def descriptors_from_colmap_db(cursor, image_id):
     cursor.execute('SELECT cols, data FROM descriptors WHERE image_id=?;',(image_id,))
     feature_dim, blob = next(cursor)
@@ -98,6 +101,7 @@ def descriptors_from_colmap_db(cursor, image_id):
     return desc
 
 
+## Taken from original hfnet repository
 def keypoints_from_colmap_db(cursor, image_id):
     cursor.execute('SELECT cols, data FROM keypoints WHERE image_id=?;',(image_id,))
     cols, blob = next(cursor)
@@ -110,6 +114,7 @@ def get_kpts_desc(cursor, image_id):
     desc = descriptors_from_colmap_db(cursor, image_id)
     return kpts, desc
 
+## Taken from original hfnet repository
 def get_img_id(cursor, img_name):
     img_id, = next(cursor.execute('SELECT image_id FROM images WHERE name=?;',(img_name,)))
     return img_id
@@ -170,12 +175,32 @@ def time_to_str(t):
         
     return out_str
 
+def calc_neighbor_match(img_idx, neighbor_idx):
+    oimg = images[img_idx]
+    nimg = images[neighbor_idx]
+
+    valid_o = oimg.point3D_ids > 0 
+    pt_ids_o = oimg.point3D_ids[valid_o]
+
+    valid_n = nimg.point3D_ids > 0 
+    pt_ids_n = nimg.point3D_ids[valid_n]
+
+    shared = np.isin(pt_ids_o, pt_ids_n)
+    pt_ids_s = pt_ids_o[shared]
+    #print('Images match {:.1f}%'.format(100.0*(pt_ids_s.shape[0]/pt_ids_o.shape[0])))
+    return 100.0*(pt_ids_s.shape[0]/min([pt_ids_o.shape[0], pt_ids_n.shape[0]]))
+
+
 
 
 column_indents = [40, 1]
 seperating_char = '| '
 def print_column_entry(left_column, right_column, indents=column_indents, seperating_char=seperating_char):
     print('\t{:{}} {:>{}}{}'.format(left_column, indents[0], seperating_char, indents[1], right_column))
+
+sep_length = 100
+def print_seperator():
+    print('-'*sep_length)
 
 
 """
@@ -312,39 +337,15 @@ def global_neighbors(args, query_images):
     print_column_entry('Database global features loaded', time_to_str(t))
 
     t = time.time()
-    if args.nearest_method == 'LSH':
-        engines = {}
-        engines[args.buckets] = nearpy.Engine(global_features.shape[1], lshashes=[nearpy.hashes.RandomBinaryProjections('rbp', args.buckets)])
-        for i, v in enumerate(global_features):
-            engines[args.buckets].store_vector(v, '%d'%i)
-        indices = []
-        for d in query_global_desc:
-            nbr = engines[args.buckets].neighbours(d)
-            if len(nbr) > (args.n_neighbors):
-                if args.verify:
-                    indices.append(np.array([int(n[1]) for n in nbr])[1:args.n_neighbors])
-                else:
-                    indices.append(np.array([int(n[1]) for n in nbr])[:args.n_neighbors])
-            else:
-                b = args.buckets
-                while (len(nbr) <= args.n_neighbors):
-                    b = b // 2
-                    if b not in engines:
-                        engines[b] = nearpy.Engine(global_features.shape[1], lshashes=[nearpy.hashes.RandomBinaryProjections('rbp', b)])
-                        for i, v in enumerate(global_features):
-                            engines[b].store_vector(v, '%d'%i)
-                    nbr = engines[b].neighbours(d)
-                if args.verify:
-                    indices.append(np.array([int(n[1]) for n in nbr])[1:args.n_neighbors])
-                else:
-                    indices.append(np.array([int(n[1]) for n in nbr])[:args.n_neighbors])        
-        indices = np.array(indices)
-        del engines
-    elif str(args.nearest_method) == 'exact':
-        nbrs = NearestNeighbors(n_neighbors=args.n_neighbors).fit(global_features)
-        distances, indices = nbrs.kneighbors(query_global_desc)
+    n_neighbors = args.n_neighbors
+    if args.verify:
+        n_neighbors+=1 
+    Matcher = GlobalMatcher(args.nearest_method, n_neighbors, False, args.buckets)
+    indices = Matcher.match(global_features, query_global_desc)
+    if args.verify:
+        indices = indices[:,1:n_neighbors]
     else:
-        raise NotImplementedError('Nearest Method {} not implemented'.format(args.nearest_method))
+        indices = indices[:,:n_neighbors]
     t = time.time() - t
     print_column_entry('Nearest neighbors for all queries', time_to_str(t))
 
@@ -364,12 +365,13 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
                           nms_dist=4, conf_thresh=0.015, nn_thresh=.7, cuda=torch.cuda.is_available())
         superpoint_cursor = sqlite3.connect(args.superpoint_database).cursor()
     image_times = []
-    #if args.verify:
+    top_neighbor_match = []
+    local_matching_rate = []
     errors = []
     errors_rot = []
     mm = 'OpenCV' if args.local_matching_method == 'exact' else ('approx_torch' if torch.cuda.is_available() else 'approx_numpy')
     cuda = torch.cuda.is_available()
-    matcher = Matcher(args.ratio_thresh, mm, True)
+    matcher = LocalMatcher(args.ratio_thresh, mm, True)
     print('Local feature matching and pose retrieval')
     for query_id, query_name in enumerate(query_images):
 
@@ -382,11 +384,18 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             continue
 
         individual_image_time = time.time()
-        print_column_entry('Processing query image {}/{}'.format(query_id+1, len(query_images)), 'Expected remaining time: {}'.format(time_to_str(np.median(image_times)*(len(query_images)-query_id))) if query_id > 0 else '')
+        print_column_entry('Processing query image {}/{}'.format(query_id+1, len(query_images)), 'Expected remaining time: {}'.format(time_to_str(np.mean(image_times)*(len(query_images)-query_id))) if query_id > 0 else '')
         print_column_entry('Query path', query_name)
+        if args.verify:
+            tn = []
+            for i, idx in enumerate(indices[query_id]):
+                global_match = calc_neighbor_match(query_image_ids[query_id], image_ids[idx])
+                tn.append(global_match)
+                print_column_entry(' - Neighbor {} match'.format(i+1), '{:.1f}%'.format(global_match))
+            top_neighbor_match.append(tn)
         t = time.time()
-        cluster_query = [img_cluster[image_ids[indices[query_id][0]]]]
         cluster_orig_ids = [image_ids[indices[query_id][0]]]
+        cluster_query = [img_cluster[i] for i in cluster_orig_ids]
         for i, ind in enumerate(indices[query_id]):
             ind = image_ids[ind]
             if i == 0:
@@ -431,14 +440,21 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         #matcher = cv2.BFMatcher.create(cv2.NORM_L2)
         data_descs = []
         if 'approx' in mm:
-            query_desc = matcher.to_unit_vector(query_desc, cuda)
+            query_desc = to_unit_vector(query_desc, method=mm, cuda=cuda)
+        if args.verify and args.local_method == 'Colmap':
+            correct, incorrect = 0, 0
+            valid_o = images[query_image_ids[query_id]].point3D_ids > 0 
+            pt_ids_o = images[query_image_ids[query_id]].point3D_ids
+            pt_ids_o = pt_ids_o[:pt_ids_o.shape[0]//2]
         for c in cluster_query:
             for img in c:
+                if args.verify and img == query_image_ids[query_id]:
+                    continue
                 img_name = images[img].name
                 valid = images[img].point3D_ids > 0 
                 pt_ids = images[img].point3D_ids[valid]
                 if args.local_method == 'Colmap':
-                    data_desc = descriptors_from_colmap_db(database_cursor, img)
+                    data_desc = descriptors_from_colmap_db(database_cursor, int(img))
                     #data_kpts = kpts_to_cv(data_kpts[valid[:data_kpts.shape[0]]] - 0.5)
                     data_desc = data_desc[valid[:data_desc.shape[0]]]
                 elif args.local_method == 'Superpoint':
@@ -453,15 +469,28 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
                     #cols, desc = next(superpoint_cursor)
                     #data_desc = np.frombuffer(desc, dtype=np.float32).reshape(cols, 256)
                 if 'approx' in mm:
-                    data_desc = matcher.to_unit_vector(data_desc, cuda)
+                    data_desc = to_unit_vector(data_desc, method=mm, cuda=cuda)
                 matches = matcher.match(data_desc,query_desc)
-                matched_kpts_cv += [query_kpts[m[1]] for m in matches]
-                matched_pts += [pt_ids[m[0]] for m in matches]
+                if matches.shape[0] > 1: ## at least two matches to be considered
+                    matched_kpts_cv += [query_kpts[m[1]] for m in matches]
+                    matched_pts += [pt_ids[m[0]] for m in matches]
+                    
+                    if args.verify and args.local_method == 'Colmap':
+                        for m2, m1 in matches:
+                            if valid_o[m1]:
+                                if pt_ids_o[m1] == pt_ids[m2]:
+                                    correct += 1
+                                else:
+                                    incorrect += 1
 
         t = time.time() - t
         matched_pts_xyz = np.stack([points3d[i].xyz for i in matched_pts])
         matched_keypoints = np.vstack([np.array([x.pt[0], x.pt[1]]) for x in matched_kpts_cv])
         print_column_entry(' - Number of matched points', matched_keypoints.shape[0])
+        if args.verify and args.local_method == 'Colmap':
+            correct_prct = 100.0*(correct/float(correct+incorrect))
+            local_matching_rate.append(correct_prct)
+            print_column_entry(' - Correctly matched', '{:.1f}%'.format(correct_prct))
         print_column_entry(' - Finished matching', time_to_str(t))
         
         if len(matched_keypoints) < 5:
@@ -524,17 +553,19 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
 
         individual_image_time = time.time() - individual_image_time 
         print_column_entry('Finished image {}/{}'.format(query_id+1, len(query_images)), time_to_str(individual_image_time))
+        print_seperator()
         image_times.append(individual_image_time)
-    return image_times, errors, errors_rot
+    return image_times, np.array(errors), np.array(errors_rot), np.array(top_neighbor_match), np.array(local_matching_rate)
 
 
 
-def stats(args, setup_time, image_times, errors, errors_rot, out_file):
+def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neighbor_match, local_matching_rate):
     print('Stats')
     print_column_entry('Setup time', time_to_str(setup_time))
     print_column_entry('Average time per image', time_to_str(np.mean(image_times)))
     print_column_entry('Median time per image', time_to_str(np.median(image_times)))
     print_column_entry('Max image time', time_to_str(np.max(image_times)))
+    print_seperator()
     if args.verify:
         print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors)))
         print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors)))
@@ -542,7 +573,9 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file):
         print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot)))
         print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot)))
         print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot)))
+        print_column_entry('Average local matching rate', '{:.1f}'.format(np.mean(local_matching_rate)))
         print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors, errors_rot)))
+        
 
         out_file.write('Mean translational error\t{:.4f} m\n'.format(np.mean(errors)))
         out_file.write('Median translational error\t{:.4f} m\n'.format(np.median(errors)))
@@ -550,7 +583,51 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file):
         out_file.write('Mean angular error\t{:.4f} °\n'.format(np.mean(errors_rot)))
         out_file.write('Median angular error\t{:.4f} °\n'.format(np.median(errors_rot)))
         out_file.write('Max angular error\t{:.4f} °\n'.format(np.max(errors_rot)))
+        out_file.write('Average local matching rate\t{:.1f}\n'.format(np.mean(local_matching_rate)))
         out_file.write('Percentage results\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors, errors_rot)))
+        
+        if top_neighbor_match.max(axis=1).shape[0] > 0:
+            valid = top_neighbor_match[:,0] > 0.0
+            print_seperator()
+            print_column_entry('Filtered by good neighbors', '{} images'.format(errors[valid].shape[0]))
+            print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[valid])))
+            print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[valid])))
+            print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[valid])))
+            print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[valid])))
+            print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[valid])))
+            print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[valid])))
+            print_column_entry('Average local matching rate', '{:.1f}'.format(np.mean(local_matching_rate[valid])))
+            print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors[valid], errors_rot[valid])))
+            print_seperator()
+            print_column_entry('Filtered by bad neighbors', '{} images'.format(errors[~valid].shape[0]))
+            print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[~valid])))
+            print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[~valid])))
+            print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[~valid])))
+            print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[~valid])))
+            print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[~valid])))
+            print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[~valid])))
+            print_column_entry('Average local matching rate', '{:.1f}'.format(np.mean(local_matching_rate[~valid])))
+            print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors[~valid], errors_rot[~valid])))
+
+            out_file.write('Mean translational error good neighbors filtered\t{:.4f} m\n'.format(np.mean(errors[valid])))
+            out_file.write('Median translational error good neighbors filtered\t{:.4f} m\n'.format(np.median(errors[valid])))
+            out_file.write('Max translational error good neighbors filtered\t{:.4f} m\n'.format(np.max(errors[valid])))
+            out_file.write('Mean angular error good neighbors filtered\t{:.4f} °\n'.format(np.mean(errors_rot[valid])))
+            out_file.write('Median angular error good neighbors filtered\t{:.4f} °\n'.format(np.median(errors_rot[valid])))
+            out_file.write('Max angular error good neighbors filtered\t{:.4f} °\n'.format(np.max(errors_rot[valid])))
+            out_file.write('Average local matching rate good neighbors filtered\t{:.1f}\n'.format(np.mean(local_matching_rate[valid])))
+            out_file.write('Percentage results good neighbors filtered\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors[valid], errors_rot[valid])))
+            
+            out_file.write('Mean translational error bad neighbors filtered\t{:.4f} m\n'.format(np.mean(errors[~valid])))
+            out_file.write('Median translational error bad neighbors filtered\t{:.4f} m\n'.format(np.median(errors[~valid])))
+            out_file.write('Max translational error bad neighbors filtered\t{:.4f} m\n'.format(np.max(errors[~valid])))
+            out_file.write('Mean angular error bad neighbors filtered\t{:.4f} °\n'.format(np.mean(errors_rot[~valid])))
+            out_file.write('Median angular error bad neighbors filtered\t{:.4f} °\n'.format(np.median(errors_rot[~valid])))
+            out_file.write('Max angular error bad neighbors filtered\t{:.4f} °\n'.format(np.max(errors_rot[~valid])))
+            out_file.write('Average local matching rate bad neighbors filtered\t{:.1f}\n'.format(np.mean(local_matching_rate[~valid])))
+            out_file.write('Percentage results bad neighbors filtered\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors[~valid], errors_rot[~valid])))
+        
+        
 
         
 if __name__ == '__main__':
@@ -559,6 +636,6 @@ if __name__ == '__main__':
     points3d, images, database_cursor, query_cursor, img_cluster, camera_matrices, query_images, query_image_ids, setup_time = setup(args)
     indices, image_ids = global_neighbors(args, query_images)
     out_file = open(args.out_file, 'w', buffering=1)
-    image_times, errors, errors_rot = local_matching(args, points3d, images, database_cursor, query_cursor, img_cluster, camera_matrices, query_images, query_image_ids, indices, image_ids, out_file)   
-    stats(args, setup_time, image_times, errors, errors_rot, out_file)
+    image_times, errors, errors_rot, top_neighbor_match, local_matching_rate = local_matching(args, points3d, images, database_cursor, query_cursor, img_cluster, camera_matrices, query_images, query_image_ids, indices, image_ids, out_file)   
+    stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neighbor_match, local_matching_rate)
     out_file.close()
