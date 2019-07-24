@@ -6,7 +6,8 @@
 This idea of this repository is based on [HF-Net](www.github.com/ethz-asl/hfnet).
 
 ## Current performance
-Evaluation via [Online evaluation system][www.visuallocalization.net] \
+Evaluation via [Online evaluation system](www.visuallocalization.net)
+
 |                  | Day  | Night |
 |------------------|------|-------|
 |  High precision  | 62.7 | 11.2  |

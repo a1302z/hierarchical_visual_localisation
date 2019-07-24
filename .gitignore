@@ -10,3 +10,4 @@ aachen_eval*
 *.txt
 results/*
 figures/*
+old_code.py

@@ -54,6 +54,7 @@ parser.add_argument('--verify', action='store_true', help='Use given dataset to 
 parser.add_argument('--dataset_dir', default='data/AachenDayNight/images_upright/query/', help='Dataset directory')
 parser.add_argument('--overfit', default=None, type=int, help='Limit number of queries')
 parser.add_argument('--out_file', type=str, default='aachen_eval_.txt', help='Name of output file')
+parser.add_argument('--cluster', action='store_true', help='Create image cluster for all neighbors')
 
 
 ## Taken from original hfnet repository
@@ -391,25 +392,29 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             for i, idx in enumerate(indices[query_id]):
                 global_match = calc_neighbor_match(query_image_ids[query_id], image_ids[idx])
                 tn.append(global_match)
-                print_column_entry(' - Neighbor {} match'.format(i+1), '{:.1f}%'.format(global_match))
+                #print_column_entry(' - Neighbor {} match'.format(i+1), '{:.1f}%'.format(global_match))
+            print_column_entry(' - # Neighbors with match > 0', '{}'.format(len([i for i in tn if i > 0.0])))
             top_neighbor_match.append(tn)
         t = time.time()
         cluster_orig_ids = [image_ids[indices[query_id][0]]]
-        cluster_query = [img_cluster[i] for i in cluster_orig_ids]
-        for i, ind in enumerate(indices[query_id]):
-            ind = image_ids[ind]
-            if i == 0:
-                continue
-            point_set = img_cluster[ind]
-            disjoint = False
-            for j, c in enumerate(cluster_query):
-                if ind in c:
-                    cluster_query[j] |= point_set
-                    disjoint = True
-                    break
-            if not disjoint:
-                cluster_orig_ids.append(ind)
-                cluster_query.append(point_set)
+        if args.cluster:
+            cluster_query = [img_cluster[i] for i in cluster_orig_ids]
+            for i, ind in enumerate(indices[query_id]):
+                ind = image_ids[ind]
+                if i == 0:
+                    continue
+                point_set = img_cluster[ind]
+                disjoint = False
+                for j, c in enumerate(cluster_query):
+                    if ind in c:
+                        cluster_query[j] |= point_set
+                        disjoint = True
+                        break
+                if not disjoint:
+                    cluster_orig_ids.append(ind)
+                    cluster_query.append(point_set)
+        else:
+            cluster_query = [[image_ids[indices[query_id][i]] for i in range(args.n_neighbors)]]
         t = time.time() - t
         print_column_entry(' - Clustered neighbors', time_to_str(t))
 
@@ -438,6 +443,8 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         matched_kpts_cv = []
         matched_pts = []
         #matcher = cv2.BFMatcher.create(cv2.NORM_L2)
+        data_descs = []
+        pt_ids_all = []
         data_descs = []
         if 'approx' in mm:
             query_desc = to_unit_vector(query_desc, method=mm, cuda=cuda)
@@ -470,18 +477,26 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
                     #data_desc = np.frombuffer(desc, dtype=np.float32).reshape(cols, 256)
                 if 'approx' in mm:
                     data_desc = to_unit_vector(data_desc, method=mm, cuda=cuda)
-                matches = matcher.match(data_desc,query_desc)
-                if matches.shape[0] > 1: ## at least two matches to be considered
-                    matched_kpts_cv += [query_kpts[m[1]] for m in matches]
-                    matched_pts += [pt_ids[m[0]] for m in matches]
+                matches = matcher.match(query_desc, data_desc)
+                pt_ids_all.append(pt_ids[matches[:,1]])
+                data_descs.append(data_desc[matches[:,1]].cpu().numpy())
+        pt_ids_all = np.concatenate(pt_ids_all)
+        data_descs = np.vstack(data_descs)
+        #print(data_descs.shape)
+        if 'approx' in mm:
+            data_descs = to_unit_vector(data_descs, method=mm, cuda=cuda)
+        matches = matcher.match(query_desc, data_descs)
+        if matches.shape[0] > 1: ## at least two matches to be considered
+            matched_kpts_cv = [query_kpts[m[0]] for m in matches]
+            matched_pts = [pt_ids_all[m[1]] for m in matches]
                     
-                    if args.verify and args.local_method == 'Colmap':
-                        for m2, m1 in matches:
-                            if valid_o[m1]:
-                                if pt_ids_o[m1] == pt_ids[m2]:
-                                    correct += 1
-                                else:
-                                    incorrect += 1
+            if args.verify and args.local_method == 'Colmap':
+                for m1, m2 in matches:
+                    if valid_o[m1]:
+                        if pt_ids_o[m1] == pt_ids_all[m2]:
+                            correct += 1
+                        else:
+                            incorrect += 1
 
         t = time.time() - t
         matched_pts_xyz = np.stack([points3d[i].xyz for i in matched_pts])
@@ -514,6 +529,7 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             inliers = inliers[:, 0] if len(inliers.shape) > 1 else inliers
             num_inliers = len(inliers)
             inlier_ratio = len(inliers) / len(matched_keypoints)
+            print_column_entry(' - Inlier ratio', '{:.1f}%'.format(100.0*inlier_ratio))
             success &= num_inliers >= args.min_inliers
 
             ret, R_vec, t = cv2.solvePnP(

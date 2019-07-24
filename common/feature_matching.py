@@ -126,7 +126,11 @@ class LocalMatcher:
             x = __to_unit_torch__(x, cuda)
             y = __to_unit_torch__(y, cuda)
         with torch.no_grad():
-            d = 1. - torch.matmul(x, y.transpose(0,1))
+            y = y.transpose(0,1)
+            #print('Memory needed: {:.1f} GiB'.format(round((x.element_size() * x.nelement())/(1024*1024*1024), 1)))
+            #print('Memory needed: {:.1f} GiB'.format((y.element_size() * y.nelement())/(1024*1024*1024)))
+            #d = 1. - torch.einsum('ik,kj->ij', [x, y])
+            d = 1. - torch.matmul(x, y)
             values, indices = torch.topk(d, 2, dim=1, largest=False, sorted=True)
             valid = values[:,0] < self.ratio_thresh**2*values[:,1]
             if not torch.any(valid):

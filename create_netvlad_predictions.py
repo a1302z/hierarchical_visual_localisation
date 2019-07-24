@@ -11,7 +11,7 @@ import os
 import sqlite3
 import time
 from datetime import timedelta
-import dataset_loaders.txt_to_db import get_images
+from dataset_loaders.txt_to_db import get_images
 
 import models.netvlad_vd16_pitts30k_conv5_3_max_dag as netvlad
 from dataset_loaders.utils import load_image
@@ -63,12 +63,12 @@ predictions = []
 times = []
 model.eval()
 print('Start processing images')
-for cnt, i in enumerate(images):
-    if cnt % len(images) // 10 == 0:
+for cnt, i in enumerate(images.keys()):
+    if cnt % (len(images) // 10) == 0:
         c.commit()
-        print('%4d/%d'%(i, len(images)), end='\t')
+        print('%4d/%d'%(cnt, len(images)), end='\t')
         if len(times) > 0:
-            t = np.median(times) * (len(images)-i)
+            t = np.mean(times) * (len(images)-cnt)
             print("Estimated remaining time: %s"%str(timedelta(seconds=t)))
         else:
             print('')
