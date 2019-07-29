@@ -11,3 +11,4 @@ aachen_eval*
 results/*
 figures/*
 old_code.py
+example_evaluate.sh

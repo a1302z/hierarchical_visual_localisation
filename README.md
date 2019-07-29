@@ -1,16 +1,20 @@
-# Reimplementation of [HF-Net](www.github.com/ethz-asl/hfnet)
+# Hierarchical visual localization
 
-<b> Please note: So far we recommend using the [original repository](www.github.com/ethz-asl/hfnet) which provides more functionality and performance. </b>
+<b> Please note: So far we recommend using [HFNet](https://www.github.com/ethz-asl/hfnet) which follows the same idea and provides more functionality and performance. </b>
+
+Development happens on develop branch.
 
 ## Credits
-This idea of this repository is based on [HF-Net](www.github.com/ethz-asl/hfnet).
+The idea of this repository is based on [HF-Net](https://www.github.com/ethz-asl/hfnet).
 
 ## Current performance
-Evaluation via [Online evaluation system](www.visuallocalization.net)
+Evaluation via [online evaluation system](https://www.visuallocalization.net)
 
 |                  | Day  | Night |
 |------------------|------|-------|
-|  High precision  | 62.7 | 11.2  |
-| Medium precision | 67.5 | 17.3  |
-| Coarse precision | 70.4 | 23.5  |
+|  High precision  | 69.7 | 16.3  |
+| Medium precision | 76.3 | 23.5  |
+| Coarse precision | 82.2 | 33.7  |
+
+Benchmark results are available [here](https://www.visuallocalization.net/benchmark/)
 
