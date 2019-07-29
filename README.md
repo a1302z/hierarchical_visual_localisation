@@ -17,4 +17,3 @@ Evaluation via [online evaluation system](https://www.visuallocalization.net)
 | Coarse precision | 82.2 | 33.7  |
 
 Benchmark results are available [here](https://www.visuallocalization.net/benchmark/)
-
