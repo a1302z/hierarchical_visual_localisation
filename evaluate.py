@@ -187,7 +187,7 @@ def time_to_str(t):
 """
 Check in verification pipeline if global neighbor has matching 3d points with query image
 """
-def calc_neighbor_match(img_idx, neighbor_idx):
+def calc_neighbor_match(img_idx, neighbor_idx, images):
     oimg = images[img_idx]
     nimg = images[neighbor_idx]
 
@@ -482,7 +482,7 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         if args.verify:
             tn = []
             for i, idx in enumerate(indices[query_id]):
-                global_match = calc_neighbor_match(query_image_ids[query_id], image_ids[idx])
+                global_match = calc_neighbor_match(query_image_ids[query_id], image_ids[idx], images)
                 tn.append(global_match)
                 #print_column_entry(' - Neighbor {} match'.format(i+1), '{:.1f}%'.format(global_match))
             print_column_entry(' - # Neighbors with match > 0', '{}'.format(len([i for i in tn if i > 0.0])))

@@ -30,6 +30,8 @@ class GlobalMatcher:
             self.match = lambda x,y: self.__exact(x, y, n_neighbors)
         elif method == 'approx':
             self.match = lambda x,y: self.__approx__(y, x, n_neighbors, unit_vectors, torch.cuda.is_available())
+        elif method == 'approx_cpu':
+            self.match = lambda x,y: self.__approx_np_global__(x, y, n_neighbors, unit_vectors)
         else:
             raise NotImplementedError('Global matching method not implemented')
             
@@ -41,6 +43,18 @@ class GlobalMatcher:
             d = 1. - torch.matmul(global_features, query_global_desc.transpose(0,1))
             values, indices = torch.topk(d, n_neighbors, dim=1, largest=False, sorted=True)
             return indices.cpu().numpy()
+    def __approx_np_global__(self, x,y,n_neighbors, unit_vectors):
+        ##normalize
+        if not unit_vectors:
+            x = __to_unit_numpy__(x)
+            y = __to_unit_numpy__(y)
+        x = x.astype(np.float32)/np.linalg.norm(x.astype(np.float32),axis=-1, keepdims=True)
+        y = y.astype(np.float32)/np.linalg.norm(y.astype(np.float32),axis=-1, keepdims=True)
+        d = 1.-np.matmul(x, y.T)
+        k = np.argpartition(d, n_neighbors, axis=1)[:,:n_neighbors]
+        intm = np.argsort(np.array([d[i, k[i]] for i in range(k.shape[0])]), axis=1)
+        k = np.array([k[i,a] for i, a in enumerate(intm)])
+        return k
             
     def __exact__(self, global_features, query_global_desc, n_neighbors):
         nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(global_features)
@@ -142,3 +156,5 @@ class LocalMatcher:
                 valid_indices = torch.arange(valid.size()[0])[valid]
             ret = torch.stack([torch.Tensor([valid_indices[i], indices_valid[i]]) for i in range(valid_indices.shape[0])])
             return ret.cpu().numpy().astype(np.int64) if cuda else ret.numpy().astype(np.int64)
+        
+        
