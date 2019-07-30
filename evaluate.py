@@ -34,10 +34,11 @@ from dataset_loaders.utils import load_image
 from dataset_loaders.pose_utils import quaternion_angular_error
 import models.netvlad_vd16_pitts30k_conv5_3_max_dag as netvlad
 import models.demo_superpoint as superpoint
+from models.cirtorch_network import init_network, extract_vectors
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--global_method', default='NetVLAD', choices=['NetVLAD',], help='Which method to use for global features')
+parser.add_argument('--global_method', default='NetVLAD', choices=['NetVLAD', 'Cirtorch'], help='Which method to use for global features')
 parser.add_argument('--local_method', default='Colmap', choices=['Colmap', 'Superpoint'], help='Which method to use for local features')
 parser.add_argument('--colmap_query_database', default='data/queries.db', help='Database to colmap sift features if colmap is used as local method')
 parser.add_argument('--database_path', default='data/AachenDayNight/aachen.db', help='Path to colmap database')
@@ -240,8 +241,8 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
     data_descs = []
     if 'approx' in mm:
         query_desc = to_unit_vector(query_desc, method=mm, cuda=cuda)
+    correct, incorrect = 0, 0
     if args.verify and args.local_method == 'Colmap':
-        correct, incorrect = 0, 0
         valid_o = images[query_image_ids[query_id]].point3D_ids > 0 
         pt_ids_o = images[query_image_ids[query_id]].point3D_ids
         pt_ids_o = pt_ids_o[:pt_ids_o.shape[0]//2]
@@ -316,6 +317,8 @@ def print_config(args):
     print('Configuration')
     print_column_entry('Evaluation image directory', args.dataset_dir)
     print_column_entry('Global method', args.global_method)
+    if args.global_method == 'NetVLAD':
+        print_column_entry('Global resolution', args.global_resolution)
     print_column_entry('Local method', args.local_method)
     if args.local_method == 'Superpoint':
         #print_column_entry(' - Database', args.superpoint_database)
@@ -325,7 +328,6 @@ def print_config(args):
         print_column_entry(' - hash buckets', 2**args.buckets)
     print_column_entry('Do clustering', args.cluster)
     print_column_entry('Local matching method', args.local_matching_method)
-    print_column_entry('Global resolution', args.global_resolution)
     print_column_entry('k neighbors', args.n_neighbors)
     print_column_entry('Matching threshold', args.ratio_thresh)
     print_column_entry('Num iterations RANSAC', args.n_iter)
@@ -391,6 +393,7 @@ def global_neighbors(args, query_images):
 
     global_time = time.time()
     t = time.time()
+    print_column_entry('Calculating query descriptors', '')
     if args.global_method == 'NetVLAD':
         model = netvlad.vd16_pitts30k_conv5_3_max_dag(weights_path='data/teacher_models/netvlad_pytorch/vd16_pitts30k_conv5_3_max_dag.pth')
         model.eval()
@@ -398,7 +401,6 @@ def global_neighbors(args, query_images):
         CUDA = torch.cuda.is_available()
         if CUDA:
             model = model.cuda()
-        print_column_entry('Calculating query descriptors', '')
         low_res_transform = transforms.Compose([transforms.Resize(args.global_resolution), transforms.CenterCrop(args.global_resolution), transforms.ToTensor() ])
         for cnt, img in enumerate(query_images):
             if cnt % (len(query_images)//5) == 0:
@@ -408,6 +410,45 @@ def global_neighbors(args, query_images):
             else:
                 query_global_desc.append(model(low_res_transform(load_image(img)).unsqueeze(0)).detach().cpu().squeeze(0).numpy())
         query_global_desc = np.vstack(query_global_desc)
+    elif args.global_method == 'Cirtorch':
+        state = torch.load('data/teacher_models/retrievalSfM120k-resnet101-gem-b80fb85.pth')   
+        net_params = {}
+        net_params['architecture'] = state['meta']['architecture']
+        net_params['pooling'] = state['meta']['pooling']
+        net_params['local_whitening'] = state['meta'].get('local_whitening', False)
+        net_params['regional'] = state['meta'].get('regional', False)
+        net_params['whitening'] = state['meta'].get('whitening', False)
+        net_params['mean'] = state['meta']['mean']
+        net_params['std'] = state['meta']['std']
+        net_params['pretrained'] = False
+        # load network
+        net = init_network(net_params)
+        net.load_state_dict(state['state_dict'])
+        if 'Lw' in state['meta']:
+            net.meta['Lw'] = state['meta']['Lw']
+        ms = list(eval('[1]'))
+        if len(ms)>1 and net.meta['pooling'] == 'gem' and not net.meta['regional'] and not net.meta['whitening']:
+            msp = net.pool.p.item()
+            print(">> Set-up multiscale:")
+            print(">>>> ms: {}".format(ms))            
+            print(">>>> msp: {}".format(msp))
+        else:
+            msp = 1
+        if torch.cuda.is_available():
+            net.cuda()
+        net.eval()
+        # set up the transform
+        normalize = transforms.Normalize(
+            mean=net.meta['mean'],
+            std=net.meta['std']
+        )
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            normalize
+        ])
+        Lw = None
+        query_global_desc = extract_vectors(net, query_images, 1024, transform, ms=ms, msp=msp)
+        query_global_desc = query_global_desc.numpy().T
     else:
         raise NotImplementedError('Global method not implemented')
     t = time.time() - t
@@ -415,14 +456,18 @@ def global_neighbors(args, query_images):
     print_column_entry('{}-dim global query desc'.format(query_global_desc.shape), time_to_str(t))
 
     t = time.time()
-    global_features_cursor = get_cursor(args.global_features_db)
-    global_features = []
-    image_ids = []
-    for row in global_features_cursor.execute('SELECT image_id, cols, data FROM global_features;'):
-        global_features.append(np.frombuffer(row[2], dtype=np.float32).reshape(-1, row[1]))
-        image_ids.append(row[0])
-    global_features = np.vstack(global_features)
-    global_features_cursor.close()
+    if args.global_method == 'NetVLAD':
+        global_features_cursor = get_cursor(args.global_features_db)
+        global_features = []
+        image_ids = []
+        for row in global_features_cursor.execute('SELECT image_id, cols, data FROM global_features;'):
+            global_features.append(np.frombuffer(row[2], dtype=np.float32).reshape(-1, row[1]))
+            image_ids.append(row[0])
+        global_features = np.vstack(global_features)
+        global_features_cursor.close()
+    elif args.global_method == 'Cirtorch':
+        global_features = np.load('data/cirtorch_data_descs.npy').T
+        image_ids = [images[i].id for i in images]
     t = time.time() - t
     print_column_entry('Database global features loaded', time_to_str(t))
 
@@ -649,7 +694,68 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
         if top_neighbor_match.max(axis=1).shape[0] > 0:
             valid = top_neighbor_match.max(axis=1) > 0.0
             print_seperator()
-            print_column_entry('Filtered by good neighbors', '{} images'.format(errors[valid].shape[0]))
+            if np.any(valid):
+                print_column_entry('Filtered by good neighbors', '{} images'.format(errors[valid].shape[0]))
+                print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[valid])))
+                print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[valid])))
+                print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[valid])))
+                print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[valid])))
+                print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[valid])))
+                print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[valid])))
+                print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
+                print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[valid])))
+                print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[valid])))
+                print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[valid])))
+                print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors[valid], errors_rot[valid])))
+                out_file.write('Mean translational error good neighbors filtered\t{:.4f} m\n'.format(np.mean(errors[valid])))
+                out_file.write('Median translational error good neighbors filtered\t{:.4f} m\n'.format(np.median(errors[valid])))
+                out_file.write('Max translational error good neighbors filtered\t{:.4f} m\n'.format(np.max(errors[valid])))
+                out_file.write('Mean angular error good neighbors filtered\t{:.4f} °\n'.format(np.mean(errors_rot[valid])))
+                out_file.write('Median angular error good neighbors filtered\t{:.4f} °\n'.format(np.median(errors_rot[valid])))
+                out_file.write('Max angular error good neighbors filtered\t{:.4f} °\n'.format(np.max(errors_rot[valid])))
+                out_file.write('Average local matching rate good neighbors filtered\t{:.1f}%\n'.format(np.mean(local_matching_rate[valid])))
+                out_file.write('Average inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.mean(inlier_rates[valid])))
+                out_file.write('Min inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.min(inlier_rates[valid])))
+                out_file.write('Max inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.max(inlier_rates[valid])))
+                out_file.write('Percentage results good neighbors filtered\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors[valid], errors_rot[valid])))
+            else:
+                print_column_entry('No images found (good neighbors)', '')
+            print_seperator()
+            if np.any(~valid):
+                print_column_entry('Filtered by bad neighbors', '{} images'.format(errors[~valid].shape[0]))
+                print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[~valid])))
+                print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[~valid])))
+                print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[~valid])))
+                print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[~valid])))
+                print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[~valid])))
+                print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[~valid])))
+                print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[~valid])))
+                print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[~valid])))
+                print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[~valid])))
+                print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[~valid])))
+                print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors[~valid], errors_rot[~valid])))
+                out_file.write('Mean translational error bad neighbors filtered\t{:.4f} m\n'.format(np.mean(errors[~valid])))
+                out_file.write('Median translational error bad neighbors filtered\t{:.4f} m\n'.format(np.median(errors[~valid])))
+                out_file.write('Max translational error bad neighbors filtered\t{:.4f} m\n'.format(np.max(errors[~valid])))
+                out_file.write('Mean angular error bad neighbors filtered\t{:.4f} °\n'.format(np.mean(errors_rot[~valid])))
+                out_file.write('Median angular error bad neighbors filtered\t{:.4f} °\n'.format(np.median(errors_rot[~valid])))
+                out_file.write('Max angular error bad neighbors filtered\t{:.4f} °\n'.format(np.max(errors_rot[~valid])))
+                out_file.write('Average local matching rate bad neighbors filtered\t{:.1f}%\n'.format(np.mean(local_matching_rate[~valid])))
+                out_file.write('Average inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.mean(inlier_rates[~valid])))
+                out_file.write('Min inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.min(inlier_rates[~valid])))
+                out_file.write('Max inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.max(inlier_rates[~valid])))
+                out_file.write('Percentage results bad neighbors filtered\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors[~valid], errors_rot[~valid])))
+            else:
+                print_column_entry('No images found (bad neighbors)', '')
+
+            
+        print_seperator()
+        valid = np.logical_and(errors < 0.5, errors_rot < 2.0)
+        nbs = np.zeros_like(top_neighbor_match)
+        nbs[top_neighbor_match > 0.0] = 1.0
+        nbs = np.sum(nbs, axis=1)
+        if np.any(valid):
+            print_column_entry('Filtered by fine localized results', '{} images'.format(errors[valid].shape[0]))
             print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[valid])))
             print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[valid])))
             print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[valid])))
@@ -660,80 +766,31 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
             print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[valid])))
             print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[valid])))
             print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[valid])))
-            print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors[valid], errors_rot[valid])))
-            print_seperator()
-            print_column_entry('Filtered by bad neighbors', '{} images'.format(errors[~valid].shape[0]))
-            print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[~valid])))
-            print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[~valid])))
-            print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[~valid])))
-            print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[~valid])))
-            print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[~valid])))
-            print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[~valid])))
-            print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[~valid])))
-            print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[~valid])))
-            print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[~valid])))
-            print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[~valid])))
-            print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors[~valid], errors_rot[~valid])))
-
-            out_file.write('Mean translational error good neighbors filtered\t{:.4f} m\n'.format(np.mean(errors[valid])))
-            out_file.write('Median translational error good neighbors filtered\t{:.4f} m\n'.format(np.median(errors[valid])))
-            out_file.write('Max translational error good neighbors filtered\t{:.4f} m\n'.format(np.max(errors[valid])))
-            out_file.write('Mean angular error good neighbors filtered\t{:.4f} °\n'.format(np.mean(errors_rot[valid])))
-            out_file.write('Median angular error good neighbors filtered\t{:.4f} °\n'.format(np.median(errors_rot[valid])))
-            out_file.write('Max angular error good neighbors filtered\t{:.4f} °\n'.format(np.max(errors_rot[valid])))
-            out_file.write('Average local matching rate good neighbors filtered\t{:.1f}%\n'.format(np.mean(local_matching_rate[valid])))
-            out_file.write('Average inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.mean(inlier_rates[valid])))
-            out_file.write('Min inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.min(inlier_rates[valid])))
-            out_file.write('Max inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.max(inlier_rates[valid])))
-            out_file.write('Percentage results good neighbors filtered\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors[valid], errors_rot[valid])))
+            print_column_entry('Average correct neighbors', '{:.1f}'.format(np.mean(nbs[valid])))
+            print_column_entry('Min correct neighbors', '{:.1f}'.format(np.min(nbs[valid])))
+            print_column_entry('Max correct neighbors', '{:.1f}'.format(np.max(nbs[valid])))
+        else:
+            print_column_entry('No images found (fine localized)', '')
             
-            out_file.write('Mean translational error bad neighbors filtered\t{:.4f} m\n'.format(np.mean(errors[~valid])))
-            out_file.write('Median translational error bad neighbors filtered\t{:.4f} m\n'.format(np.median(errors[~valid])))
-            out_file.write('Max translational error bad neighbors filtered\t{:.4f} m\n'.format(np.max(errors[~valid])))
-            out_file.write('Mean angular error bad neighbors filtered\t{:.4f} °\n'.format(np.mean(errors_rot[~valid])))
-            out_file.write('Median angular error bad neighbors filtered\t{:.4f} °\n'.format(np.median(errors_rot[~valid])))
-            out_file.write('Max angular error bad neighbors filtered\t{:.4f} °\n'.format(np.max(errors_rot[~valid])))
-            out_file.write('Average local matching rate bad neighbors filtered\t{:.1f}%\n'.format(np.mean(local_matching_rate[~valid])))
-            out_file.write('Average inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.mean(inlier_rates[~valid])))
-            out_file.write('Min inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.min(inlier_rates[~valid])))
-            out_file.write('Max inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.max(inlier_rates[~valid])))
-            out_file.write('Percentage results bad neighbors filtered\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors[~valid], errors_rot[~valid])))
-            
-        print_seperator()
-        valid = np.logical_and(errors < 0.5, errors_rot < 2.0)
-        nbs = np.zeros_like(top_neighbor_match)
-        nbs[top_neighbor_match > 0.0] = 1.0
-        nbs = np.sum(nbs, axis=1)
-        print_column_entry('Filtered by fine localized results', '{} images'.format(errors[valid].shape[0]))
-        print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[valid])))
-        print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[valid])))
-        print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[valid])))
-        print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[valid])))
-        print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[valid])))
-        print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[valid])))
-        print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
-        print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[valid])))
-        print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[valid])))
-        print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[valid])))
-        print_column_entry('Average correct neighbors', '{:.1f}'.format(np.mean(nbs[valid])))
-        print_column_entry('Min correct neighbors', '{:.1f}'.format(np.min(nbs[valid])))
-        print_column_entry('Max correct neighbors', '{:.1f}'.format(np.max(nbs[valid])))
         print_seperator()
         valid = np.logical_and(errors > 5.0, errors_rot > 10.0)
-        print_column_entry('Filtered by wrongly localized results', '{} images'.format(errors[valid].shape[0]))
-        print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[valid])))
-        print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[valid])))
-        print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[valid])))
-        print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[valid])))
-        print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[valid])))
-        print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[valid])))
-        print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
-        print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[valid])))
-        print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[valid])))
-        print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[valid])))
-        print_column_entry('Average correct neighbors', '{:.1f}'.format(np.mean(nbs[valid])))
-        print_column_entry('Min correct neighbors', '{:.1f}'.format(np.min(nbs[valid])))
-        print_column_entry('Max correct neighbors', '{:.1f}'.format(np.max(nbs[valid])))
+        if np.any(valid):
+            print_column_entry('Filtered by wrongly localized results', '{} images'.format(errors[valid].shape[0]))
+            print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[valid])))
+            print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[valid])))
+            print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[valid])))
+            print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[valid])))
+            print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[valid])))
+            print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[valid])))
+            print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
+            print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[valid])))
+            print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[valid])))
+            print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[valid])))
+            print_column_entry('Average correct neighbors', '{:.1f}'.format(np.mean(nbs[valid])))
+            print_column_entry('Min correct neighbors', '{:.1f}'.format(np.min(nbs[valid])))
+            print_column_entry('Max correct neighbors', '{:.1f}'.format(np.max(nbs[valid])))
+        else:
+            print_column_entry('No images found (wrong localized)', '')
         
         
         
