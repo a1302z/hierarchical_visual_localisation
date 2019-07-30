@@ -1,7 +1,7 @@
 # Hierarchical visual localization
 Visual localization pipeline using following steps
-1) Find similar database images by using global descriptors
-2) Extract local descriptors from database and query image
+1) Find similar database images (neighbors) by using global descriptors
+2) Extract local descriptors from neighboring database and query image
 3) Match local descriptors
 4) Calculate 6-DoF pose using RANSAC scheme
 
@@ -17,6 +17,7 @@ We reused code from the following repositories.
 - [Superpoint](https://github.com/MagicLeapResearch/SuperPointPretrainedNetwork)
 
 ## Current performance
+### Results
 Evaluation via [online evaluation system](https://www.visuallocalization.net)  
 [Benchmark results](https://www.visuallocalization.net/benchmark/)  
 
@@ -38,3 +39,14 @@ Command to reproduce result:
 
 ``` python evaluate.py --ratio_thresh 0.75 --n_neighbors 20 --global_method Cirtorch --local_method Superpoint ```
 
+### Speed
+Evaluated using following hardware:
+ - Intel(R) Xeon(R) CPU E5520  @ 2.27GHz
+ - GeForce GTX TITAN X
+ 
+ |                   | Colmap     | Superpoint |
+ | ----------------- | ---------- | ---------- |
+ | Setup time        | 50 seconds | 45 seconds |
+ | Mean time / img   | <1 seconds | 3 seconds  |
+ | Median time / img | <1 seconds | 3 seconds  |
+ | Max time / img    | 2 seconds  | 14 seconds |
