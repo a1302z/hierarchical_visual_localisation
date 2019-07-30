@@ -1,4 +1,9 @@
 # Hierarchical visual localization
+Visual localization pipeline using following steps
+1) Find similar database images by using global descriptors
+2) Extract local descriptors from database and query image
+3) Match local descriptors
+4) Calculate 6-DoF pose using RANSAC scheme
 
 ## Credits
 ### Idea
@@ -12,7 +17,8 @@ We reused code from the following repositories.
 - [Superpoint](https://github.com/MagicLeapResearch/SuperPointPretrainedNetwork)
 
 ## Current performance
-Evaluation via [online evaluation system](https://www.visuallocalization.net)
+Evaluation via [online evaluation system](https://www.visuallocalization.net)  
+[Benchmark results](https://www.visuallocalization.net/benchmark/)  
 
 | Cirtorch/Colmap  | Day  | Night |
 |------------------|------|-------|
@@ -32,4 +38,3 @@ Command to reproduce result:
 
 ``` python evaluate.py --ratio_thresh 0.75 --n_neighbors 20 --global_method Cirtorch --local_method Superpoint ```
 
-Benchmark results are available [here](https://www.visuallocalization.net/benchmark/)
