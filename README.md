@@ -20,8 +20,8 @@ Evaluation via [online evaluation system](https://www.visuallocalization.net)
 | Medium precision | 83.7 | 28.6  |
 | Coarse precision | 87.7 | 36.7  |
 
-Command to reproduce result:
-''' python evaluate.py --ratio_thresh 0.75 --n_neighbors 20 --global_method Cirtorch '''
+Command to reproduce result:  
+``` python evaluate.py --ratio_thresh 0.75 --n_neighbors 20 --global_method Cirtorch ```
 
 
 | Cirtorch/Superpoint | Day  | Night |
@@ -30,6 +30,6 @@ Command to reproduce result:
 | Medium precision    | 77.3 | 49.0  |
 | Coarse precision    | 88.6 | 61.2  |
 
-''' python evaluate.py --ratio_thresh 0.75 --n_neighbors 20 --global_method Cirtorch --local_method Superpoint '''
+``` python evaluate.py --ratio_thresh 0.75 --n_neighbors 20 --global_method Cirtorch --local_method Superpoint ```
 
 Benchmark results are available [here](https://www.visuallocalization.net/benchmark/)
