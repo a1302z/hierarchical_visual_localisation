@@ -269,7 +269,7 @@ def init_network(params):
     if pretrained and architecture in FEATURES:
         print(">> {}: for '{}' custom pretrained features '{}' are used"
             .format(os.path.basename(__file__), architecture, os.path.basename(FEATURES[architecture])))
-        model_dir = os.path.join(get_data_root(), 'networks')
+        model_dir = 'data/teacher_models' #os.path.join(get_data_root(), 'networks')
         net.features.load_state_dict(model_zoo.load_url(FEATURES[architecture], model_dir=model_dir))
 
     return net

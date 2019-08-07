@@ -1,4 +1,4 @@
-# Hierarchical visual localization
+# Hierarchical visual localization pipeline
 Visual localization pipeline using following steps
 1) Find similar database images (neighbors) by using global descriptors
 2) Extract local descriptors from neighboring database and query image

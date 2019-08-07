@@ -181,7 +181,7 @@ def time_to_str(t):
     if t > 60:
         out_str += '%d minutes '%(t//60)
         t %= 60
-    out_str += '%d seconds'%t
+    out_str += '%.1f seconds'%t
         
     return out_str
 
@@ -271,9 +271,11 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
             if 'approx' in mm:
                 data_desc = to_unit_vector(data_desc, method=mm, cuda=cuda)
             matches = matcher.match(query_desc, data_desc)
+            if type(data_desc) is torch.Tensor:
+                data_desc = data_desc.cpu().numpy()
             if matches.shape[0] > 1:
                 pt_ids_all.append(pt_ids[matches[:,1]])
-                data_descs.append(data_desc[matches[:,1]].cpu().numpy())
+                data_descs.append(data_desc[matches[:,1]])
     pt_ids_all = np.concatenate(pt_ids_all)
     data_descs = np.vstack(data_descs)
     #print(data_descs.shape)
