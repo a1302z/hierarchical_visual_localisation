@@ -19,10 +19,10 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
     
     n_epochs = training_params.getint('n_epochs')
     overfit = training_params.getint('overfit', -1)
-    n_samples = len(dataset) if overfit < 0 else overfit
+    n_samples = len(dataset) if overfit < 0 else overfit // config['Training'].getint('batch_size', 1)
     
     log_division = logging_params.getint('log_division',10)
-    log_division = log_division if overfit < 0 else overfit // 2
+    log_division = log_division if overfit < 0 else 1
     save_interval = training_params.getint('save_interval', n_epochs//2)
     do_val = training_params.getboolean('validation', True)
     val_frequency = training_params.getint('val_frequency', 1)
@@ -86,14 +86,16 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
             save_checkpoint(epoch, n_epochs, [ptnet, cnn2d], optim, base_dir)
         
         ## Validation
-        if do_val and epoch % val_frequency == 0:
+        if do_val and (epoch % val_frequency) == 0:
             print('Validation in progress')
             t1 = time.time()
             ptnet.eval()
             cnn2d.eval()
             val_losses = []
-            n_val = len(kwargs['val_set'])
+            n_val = len(kwargs['val_set']) if overfit <= 0 else overfit
             for i, data in enumerate(kwargs['val_set']):
+                if i > n_val:
+                    break
                 if CUDA:
                     data[0] = data[0].cuda()
                     data[1] = data[1].to(device)#Data(pos=data[1].cuda(), batch=torch.cuda.LongTensor([0]*data[1].size(0)))
@@ -101,11 +103,12 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
                 #else:
                 #    data[1] = Data(pos=data[1], batch=torch.LongTensor([0]*data[1].size(0)))
                 #    data[2] = Data(pos=data[2], batch=torch.LongTensor([0]*data[2].size(0)))
-                val_loss = step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, None, train=False)    
+                with torch.no_grad():
+                    val_loss = step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, None, train=False)    
                 #val_loss = step_feedfwd(model, data.unsqueeze(0), target.unsqueeze(0), loss_fn, None,train=False)
                 val_losses.append(val_loss.item())
                 if i % (n_val//log_division) == 0:
-                    print('\t%d/%d samples (Loss: %.3f)'%(i, n_val, val_loss.item()))
+                    print('\t%d/%d samples (Loss: %.3f)'%(i, n_val, np.mean(val_losses)))
             plotter.plot('Loss', 'Val loss', epoch, np.mean(val_losses))
             ptnet.train()
             cnn2d.train()
@@ -133,7 +136,7 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
                 
             losses.append(loss.item())
             ## Logging 
-            if i % (n_samples//log_division) == 0:
+            if i % (n_samples//log_division) == 0 and (epoch == 0 or i > 0):
                 m_loss = np.mean(losses)
                 print('\t%d/%d samples (Mean loss: %.3f)'%(i, n_samples, m_loss))
                 if use_visdom:
@@ -150,8 +153,10 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
         cnn2d.eval()
         val_losses = []
         correct = 0
-        n_val = len(kwargs['val_set'])
+        n_val = len(kwargs['val_set']) if overfit <= 0 else overfit
         for i, data in enumerate(kwargs['val_set']):
+            if i > n_val:
+                break
             if CUDA:
                 data[0] = data[0].cuda()
                 data[1] = data[1].to(device)#Data(pos=data[1].cuda(), batch=torch.cuda.LongTensor([0]*data[1].size(0)))
@@ -159,7 +164,8 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
             #else:
             #    data[1] = Data(pos=data[1], batch=torch.LongTensor([0]*data[1].size(0)))
             #    data[2] = Data(pos=data[2], batch=torch.LongTensor([0]*data[2].size(0)))
-            val_loss = step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, None, train=False) 
+            with torch.no_grad():
+                val_loss = step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, None, train=False) 
             val_losses.append(val_loss.item())
             #if prediction.argmax() == target.item():
             #    correct += 1

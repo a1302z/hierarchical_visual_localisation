@@ -64,13 +64,17 @@ if args.dataset == 'Aachen':
     ])
     
     dataset = PointCloudImagesFromList('data/AachenDayNight/images_upright', images, points3d, imsize=cp['DataParams'].getint('input_size', 1024), transform=transform, triplet=True, min_num_points=cp['Training'].getint('min_num_3dpts', 100))
-    #dataloader = torch.utils.data.DataLoader(dataset, batch_size=cp['Training'].getint('batch_size', 4))
     do_val = cp['Training'].getboolean('validation', True)
     if do_val:
+        overfit = cp['Training'].getint('overfit', -1)
         dataset_split = PointCloudSplit(dataset, val=False, split=cp['Training'].getint('val_split', 10))
-        val_set = PointCloudSplit(dataset, val=True, split=cp['Training'].getint('val_split', 10))
-        dataloader = PCDataLoader(dataset_split, batch_size=cp['Training'].getint('batch_size', 10), shuffle=True)
-        val_loader = PCDataLoader(val_set, batch_size=1, shuffle=False)
+        dataloader = PCDataLoader(dataset_split, batch_size=cp['Training'].getint('batch_size', 10) if overfit < 0 else 1, shuffle=True if overfit < 0 else False)
+        
+        if overfit >= 0:
+            val_loader = dataloader # PCDataLoader(dataset_split, batch_size=1, shuffle=False)
+        else:
+            val_set = PointCloudSplit(dataset, val=True, split=cp['Training'].getint('val_split', 10))
+            val_loader = PCDataLoader(val_set, batch_size=1, shuffle=False)
     else:
         dataloader = PCDataLoader(dataset, batch_size=cp['Training'].getint('batch_size', 10), shuffle=True)
         
