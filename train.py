@@ -99,7 +99,7 @@ cir = init_network({'architecture' : 'resnet34'})
 
 
 ## Start training
-train_model.train_classifier(pointnet, cir, dataloader, cp, args,
+train_model.train_triplet(pointnet, cir, dataloader, cp, args,
                             device = args.device, hostname=args.hostname, port=args.port,
                             exp_name = args.exp_name, val_set = val_loader if do_val else None
                             )

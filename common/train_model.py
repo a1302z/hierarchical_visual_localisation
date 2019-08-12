@@ -11,7 +11,7 @@ from common.utils import VisdomLinePlotter
 from torch_geometric.data import Data
 
 
-def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
+def train_triplet(ptnet, cnn2d, dataset, config, args, **kwargs):
     ## Init params
     training_params = config['Training']
     logging_params = config['Logging']
@@ -97,9 +97,11 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
                 if i > n_val:
                     break
                 if CUDA:
-                    data[0] = data[0].cuda()
-                    data[1] = data[1].to(device)#Data(pos=data[1].cuda(), batch=torch.cuda.LongTensor([0]*data[1].size(0)))
-                    data[2] = data[2].to(device)#Data(pos=data[2].cuda(), batch=torch.cuda.LongTensor([0]*data[2].size(0)))
+                    for j in range(len(data)):
+                        data[j] = data[j].to(device)
+                    #data[0] = data[0].cuda()
+                    #data[1] = data[1].to(device)#Data(pos=data[1].cuda(), batch=torch.cuda.LongTensor([0]*data[1].size(0)))
+                    #data[2] = data[2].to(device)#Data(pos=data[2].cuda(), batch=torch.cuda.LongTensor([0]*data[2].size(0)))
                 #else:
                 #    data[1] = Data(pos=data[1], batch=torch.LongTensor([0]*data[1].size(0)))
                 #    data[2] = Data(pos=data[2], batch=torch.LongTensor([0]*data[2].size(0)))
@@ -124,9 +126,11 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
             if i > n_samples: ##overfit
                 break
             if CUDA:
-                data[0] = data[0].cuda()
-                data[1] = data[1].to(device)#Data(pos=data[1].cuda(), batch=torch.cuda.LongTensor([0]*data[1].size(0)))
-                data[2] = data[2].to(device)#Data(pos=data[2].cuda(), batch=torch.cuda.LongTensor([0]*data[2].size(0)))
+                for j in range(len(data)):
+                    data[j] = data[j].to(device)
+                #data[0] = data[0].cuda()
+                #data[1] = data[1].to(device)#Data(pos=data[1].cuda(), batch=torch.cuda.LongTensor([0]*data[1].size(0)))
+                #data[2] = data[2].to(device)#Data(pos=data[2].cuda(), batch=torch.cuda.LongTensor([0]*data[2].size(0)))
             #else:
             #    data[1] = Data(pos=data[1], batch=torch.LongTensor([0]*data[1].size(0)))
             #    data[2] = Data(pos=data[2], batch=torch.LongTensor([0]*data[2].size(0)))
@@ -158,9 +162,11 @@ def train_classifier(ptnet, cnn2d, dataset, config, args, **kwargs):
             if i > n_val:
                 break
             if CUDA:
-                data[0] = data[0].cuda()
-                data[1] = data[1].to(device)#Data(pos=data[1].cuda(), batch=torch.cuda.LongTensor([0]*data[1].size(0)))
-                data[2] = data[2].to(device)#Data(pos=data[2].cuda(), batch=torch.cuda.LongTensor([0]*data[2].size(0)))
+                for j in range(len(data)):
+                    data[j] = data[j].to(device)
+                #data[0] = data[0].cuda()
+                #data[1] = data[1].to(device)#Data(pos=data[1].cuda(), batch=torch.cuda.LongTensor([0]*data[1].size(0)))
+                #data[2] = data[2].to(device)#Data(pos=data[2].cuda(), batch=torch.cuda.LongTensor([0]*data[2].size(0)))
             #else:
             #    data[1] = Data(pos=data[1], batch=torch.LongTensor([0]*data[1].size(0)))
             #    data[2] = Data(pos=data[2], batch=torch.LongTensor([0]*data[2].size(0)))
@@ -196,14 +202,19 @@ def step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, optim, train=True):
         optim.zero_grad()
     if len(data[0].size()) <= 3:
         data[0] = data[0].unsqueeze(0)
-    anchor = cnn2d(data[0]).transpose(0,1)
+        data[2] = data[2].unsqueeze(0)
+    img_pos = cnn2d(data[0]).transpose(0,1)
+    img_neg = cnn2d(data[2]).transpose(0,1)
     #Data(pos=torch.Tensor(10, 3), batch=torch.LongTensor([0]*10))
-    pos = ptnet(data[1])
-    neg = ptnet(data[2])
+    pt_pos = ptnet(data[1])
+    pt_neg = ptnet(data[3])
     #print('Shape anchor {}'.format(anchor.size()))
     #print('Shape pos {}'.format(pos.size()))
     #print('Shape neg {}'.format(neg.size()))
-    loss = loss_fn(anchor, pos, neg)
+    loss = loss_fn(img_pos, pt_pos, pt_neg)
+    loss += loss_fn(pt_pos, img_pos, img_neg)
+    loss += loss_fn(img_neg, pt_neg, pt_pos)
+    loss += loss_fn(pt_neg, img_neg, img_pos)
     if train:
         loss.backward()
         optim.step()

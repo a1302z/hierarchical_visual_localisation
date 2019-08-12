@@ -2,7 +2,7 @@
 Author: A. Ziller (Technical University of Munich)
 
 This script evaluates position and orientation of given images in a scene. 
-It follows the hierarchical idea of HF-NET which is shortly summarized as follows:
+It follows the hierarchical idea of hierarchical localization which is shortly summarized as follows:
 1) Find global neighbors
 2) Cluster global neighbors (optional)
 3) Find local features
@@ -38,7 +38,7 @@ from models.cirtorch_network import init_network, extract_vectors
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--global_method', default='NetVLAD', choices=['NetVLAD', 'Cirtorch'], help='Which method to use for global features')
+parser.add_argument('--global_method', default='Cirtorch', choices=['NetVLAD', 'Cirtorch'], help='Which method to use for global features')
 parser.add_argument('--local_method', default='Colmap', choices=['Colmap', 'Superpoint'], help='Which method to use for local features')
 parser.add_argument('--colmap_query_database', default='data/queries.db', help='Database to colmap sift features if colmap is used as local method')
 parser.add_argument('--database_path', default='data/AachenDayNight/aachen.db', help='Path to colmap database')
@@ -47,15 +47,15 @@ parser.add_argument('--global_features_db', default='data/global_features_low_re
 parser.add_argument('--superpoint_model_path', default='data/teacher_models/superpoint_v1.pth', help='Path to pretrained superpoint model')
 parser.add_argument('--nearest_method', default='approx', type = str, choices=['exact', 'LSH', 'approx'], help='Which method to use to find nearest global neighbors')
 parser.add_argument('--local_matching_method', default='approx', type=str, choices=['exact', 'approx'], help='How local features are matched. Approx only considers direction of feature vector but is much faster.')
-parser.add_argument('--global_resolution', default=224, type=int, help='Resolution on which nearest global neighbors are calculated')
-#parser.add_argument('--augmentation', action='store_true', help='Use augmented images')
+#parser.add_argument('--global_resolution', default=224, type=int, help='Resolution on which nearest global neighbors are calculated')
+parser.add_argument('--augmentation', action='store_true', help='Use augmented images')
 parser.add_argument('--ratio_thresh', type=float, default=.75, help='Threshold for local feature matching in range [0.0, 1.0]. The higher it is the less similar matches have to be.')
 parser.add_argument('--n_iter', type=int, default=5000, help='Number of iterations in RANSAC loop')
 parser.add_argument('--reproj_error', type=float, default=8., help='Reprojection error of PnP-RANSAC loop')
 parser.add_argument('--min_inliers', type=int, default=5, help='minimal number of inliers after PnP-RANSAC')
-parser.add_argument('--n_neighbors', default=100, type=int, help='How many global neighbors are used')
+parser.add_argument('--n_neighbors', default=20, type=int, help='How many global neighbors are used')
 parser.add_argument('--buckets', default=5, type=int, help='How many buckets are used for LSH hashing (Note: num of buckets = 2^(argument))')
-parser.add_argument('--verify', action='store_true', help='Use given dataset to evaluate error on own images. Verifies that pipeline works')
+parser.add_argument('--verify', default = None, choices=['all', 'day', 'night'], help='Use given dataset to evaluate error on own images. Verifies that pipeline works')
 parser.add_argument('--dataset_dir', default='data/AachenDayNight/images_upright/query/', help='Dataset directory')
 parser.add_argument('--overfit', default=None, type=int, help='Limit number of queries')
 parser.add_argument('--out_file', type=str, default='aachen_eval_.txt', help='Name of output file')
@@ -186,6 +186,19 @@ def time_to_str(t):
     return out_str
 
 """
+Use for colour output
+"""
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+"""
 Check in verification pipeline if global neighbor has matching 3d points with query image
 """
 def calc_neighbor_match(img_idx, neighbor_idx, images):
@@ -231,36 +244,43 @@ def get_img_cluster(images, points3d):
             img_cluster[img_id] |= img_ids
     return img_cluster
 
-def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, extractor, matcher):
+def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, extractor, matcher, refilter=False):
     cuda = torch.cuda.is_available()
     matched_kpts_cv = []
     matched_pts = []
     #matcher = cv2.BFMatcher.create(cv2.NORM_L2)
     data_descs = []
-    pt_ids_all = []
-    data_descs = []
+    if refilter:
+        pt_ids_all = []
+        data_descs = []
     if 'approx' in mm:
         query_desc = to_unit_vector(query_desc, method=mm, cuda=cuda)
     correct, incorrect = 0, 0
-    if args.verify and args.local_method == 'Colmap':
+    augments = 0
+    if args.verify is not None and args.local_method == 'Colmap':
         valid_o = images[query_image_ids[query_id]].point3D_ids > 0 
         pt_ids_o = images[query_image_ids[query_id]].point3D_ids
         pt_ids_o = pt_ids_o[:pt_ids_o.shape[0]//2]
     for c in cluster_query:
         for img in c:
-            if args.verify and img == query_image_ids[query_id]:
+            if args.verify is not None and abs(img) == abs(query_image_ids[query_id]):
                 continue
-            img_name = images[img].name
-            valid = images[img].point3D_ids > 0 
-            pt_ids = images[img].point3D_ids[valid]
+            img_name = images[abs(img)].name
+            valid = images[abs(img)].point3D_ids > 0 
+            pt_ids = images[abs(img)].point3D_ids[valid]
             if args.local_method == 'Colmap':
                 data_desc = descriptors_from_colmap_db(database_cursor, int(img))
                 #data_kpts = kpts_to_cv(data_kpts[valid[:data_kpts.shape[0]]] - 0.5)
                 data_desc = data_desc[valid[:data_desc.shape[0]]]
             elif args.local_method == 'Superpoint':
-                path_to_img = 'data/AachenDayNight/images_upright/'+img_name
+                if img > 0:
+                    path_to_img = 'data/AachenDayNight/images_upright/'+img_name
+                else:
+                    path_to_img = 'data/AachenDayNight/AugmentedNightImages_high_res/'+img_name.replace('db/', '').replace('.jpg', '.png')
+                    augments += 1
+                    
                 cv_img = cv2.imread(path_to_img, 0).astype(np.float32)/255.0
-                data_kpts = keypoints_from_colmap_db(database_cursor, int(img))
+                data_kpts = keypoints_from_colmap_db(database_cursor, abs(int(img)))
                 data_kpts = data_kpts[valid[:data_kpts.shape[0]]] - 0.5
                 _, data_desc, _ = extractor.run(cv_img, points=data_kpts)
                 data_desc = data_desc.T
@@ -274,27 +294,36 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
             if type(data_desc) is torch.Tensor:
                 data_desc = data_desc.cpu().numpy()
             if matches.shape[0] > 1:
-                pt_ids_all.append(pt_ids[matches[:,1]])
-                data_descs.append(data_desc[matches[:,1]])
-    pt_ids_all = np.concatenate(pt_ids_all)
-    data_descs = np.vstack(data_descs)
+                if refilter:
+                    pt_ids_all.append(pt_ids[matches[:,1]])
+                    data_descs.append(data_desc[matches[:,1]])
+                else:
+                    matched_kpts_cv += [query_kpts[m[0]] for m in matches]
+                    matched_pts += [pt_ids[m[1]] for m in matches]
+    if refilter:
+        pt_ids_all = np.concatenate(pt_ids_all)
+        data_descs = np.vstack(data_descs)
     #print(data_descs.shape)
-    if 'approx' in mm:
-        data_descs = to_unit_vector(data_descs, method=mm, cuda=cuda)
-    matches = matcher.match(query_desc, data_descs)
+    if refilter:
+        if 'approx' in mm:
+            data_descs = to_unit_vector(data_descs, method=mm, cuda=cuda)
+        matches = matcher.match(query_desc, data_descs)
     if matches.shape[0] > 1: ## at least two matches to be considered
-        matched_kpts_cv = [query_kpts[m[0]] for m in matches]
-        matched_pts = [pt_ids_all[m[1]] for m in matches]
+        if refilter:
+            matched_kpts_cv = [query_kpts[m[0]] for m in matches]
+            matched_pts = [pt_ids_all[m[1]] for m in matches]
                     
-        if args.verify and args.local_method == 'Colmap':
-            for m1, m2 in matches:
-                if valid_o[m1]:
-                    if pt_ids_o[m1] == pt_ids_all[m2]:
-                        correct += 1
-                    else:
-                        incorrect += 1
+            if args.verify is not None and args.local_method == 'Colmap':
+                for m1, m2 in matches:
+                    if valid_o[m1]:
+                        if pt_ids_o[m1] == pt_ids_all[m2]:
+                            correct += 1
+                        else:
+                            incorrect += 1
     matched_pts_xyz = np.stack([points3d[i].xyz for i in matched_pts])
     matched_keypoints = np.vstack([np.array([x.pt[0], x.pt[1]]) for x in matched_kpts_cv])
+    if args.augmentation:
+        print_column_entry(' - Augmented images used', augments)
     return matched_pts_xyz, matched_keypoints, correct, incorrect
 
 
@@ -319,8 +348,8 @@ def print_config(args):
     print('Configuration')
     print_column_entry('Evaluation image directory', args.dataset_dir)
     print_column_entry('Global method', args.global_method)
-    if args.global_method == 'NetVLAD':
-        print_column_entry('Global resolution', args.global_resolution)
+    #if args.global_method == 'NetVLAD':
+    #    print_column_entry('Global resolution', args.global_resolution)
     print_column_entry('Local method', args.local_method)
     if args.local_method == 'Superpoint':
         #print_column_entry(' - Database', args.superpoint_database)
@@ -335,6 +364,9 @@ def print_config(args):
     print_column_entry('Num iterations RANSAC', args.n_iter)
     print_column_entry('Reprojection error', args.reproj_error)
     print_column_entry('Minimum num inliers PnP', args.min_inliers)
+    print_column_entry('Use augmentation', args.augmentation)
+    if args.augmentation and (args.local_method == 'Colmap' or args.global_method == 'NetVLAD'):
+        raise NotImplementedError('Augmentation currently only works for Cirtorch/Superpoint')
 
 
 
@@ -370,9 +402,15 @@ def setup(args):
     print_column_entry('Read camera matrices', time_to_str(t))
 
     t = time.time()
-    if args.verify:
-        query_images = [os.path.join(args.dataset_dir, images[i].name) for i in images]
-        query_image_ids = [i for i in images]
+    if args.verify is not None:
+        query_images = []
+        query_image_ids = []
+        if args.verify == 'all' or args.verify == 'day':
+            query_images += [os.path.join(args.dataset_dir, images[i].name) for i in images]
+            query_image_ids += [i for i in images]
+        if args.verify == 'all' or args.verify == 'night':
+            query_images += [os.path.join('data/AachenDayNight/AugmentedNightImages_high_res', images[i].name.replace('db/', '').replace('.jpg', '.png')) for i in images]
+            query_image_ids += [-i for i in images]
     else:
         query_images = get_files(args.dataset_dir, '*.jpg')
         query_image_ids = None
@@ -403,7 +441,8 @@ def global_neighbors(args, query_images):
         CUDA = torch.cuda.is_available()
         if CUDA:
             model = model.cuda()
-        low_res_transform = transforms.Compose([transforms.Resize(args.global_resolution), transforms.CenterCrop(args.global_resolution), transforms.ToTensor() ])
+        low_res_transform = transforms.Compose([transforms.Resize(224),#args.global_resolution),
+                                                transforms.CenterCrop(args.global_resolution), transforms.ToTensor() ])
         for cnt, img in enumerate(query_images):
             if cnt % (len(query_images)//5) == 0:
                 print_column_entry('', '{}/{} query descriptors'.format(cnt, len(query_images)))
@@ -470,6 +509,10 @@ def global_neighbors(args, query_images):
     elif args.global_method == 'Cirtorch':
         global_features = np.load('data/cirtorch_data_descs.npy').T
         image_ids = [images[i].id for i in images]
+        if args.augmentation:
+            aug_features = np.load('data/cirtorch_augmented_descs.npy').T
+            global_features = np.concatenate([global_features, aug_features])
+            image_ids += [-images[i].id for i in images]
     t = time.time() - t
     print_column_entry('Database global features loaded', time_to_str(t))
 
@@ -479,16 +522,30 @@ def global_neighbors(args, query_images):
     """
     t = time.time()
     n_neighbors = args.n_neighbors
-    if args.verify:
-        n_neighbors+=1 
+    if args.verify is not None:
+        n_neighbors+= 2 if args.augmentation else 1
     Matcher = GlobalMatcher(args.nearest_method, n_neighbors, False, args.buckets)
     indices = Matcher.match(global_features, query_global_desc)
     """
     For verification pipeline the closest neighbor is always the query image itself.
     Hence we remove it to simulate real conditions.
     """
-    if args.verify:
-        indices = indices[:,1:n_neighbors]
+    if args.verify is not None:
+        indices_cut = []
+        for i in range(indices.shape[0]):
+            #indices_cut.append(indices[i,1:n_images+1])
+            lst = []
+            j = 0
+            img_itself = abs(image_ids[indices[i,0]])
+            for idx in indices[i,1:]:
+                if abs(image_ids[idx]) != img_itself:
+                    lst.append(idx)
+                    j += 1
+                if j >= args.n_neighbors:
+                    break
+            indices_cut.append(lst)
+            #print(len(lst))
+        indices = np.stack(indices_cut)
     else:
         indices = indices[:,:n_neighbors]
     t = time.time() - t
@@ -506,7 +563,7 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
     image_times = []
     top_neighbor_match = []
     local_matching_rate = []
-    inlier_rates = []
+    inlier_rates, inlier_nums = [], []
     errors = []
     errors_rot = []
     mm = 'OpenCV' if args.local_matching_method == 'exact' else ('approx_torch' if torch.cuda.is_available() else 'approx_numpy')
@@ -516,8 +573,8 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
     for query_id, query_name in enumerate(query_images):
 
         ## Make sure we have camera parameters.
-        if args.verify:
-            query_path = images[query_image_ids[query_id]].name
+        if args.verify is not None:
+            query_path = images[abs(query_image_ids[query_id])].name
         else:
             query_path = os.path.join(*os.path.normpath(query_name).split(os.sep)[-4:])
         if query_path not in camera_matrices:
@@ -526,10 +583,10 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         individual_image_time = time.time()
         print_column_entry('Processing query image {}/{}'.format(query_id+1, len(query_images)), 'Expected remaining time: {}'.format(time_to_str(np.mean(image_times)*(len(query_images)-query_id))) if query_id > 0 else '')
         print_column_entry('Query path', query_name)
-        if args.verify:
+        if args.verify is not None:
             tn = []
             for i, idx in enumerate(indices[query_id]):
-                global_match = calc_neighbor_match(query_image_ids[query_id], image_ids[idx], images)
+                global_match = calc_neighbor_match(abs(query_image_ids[query_id]), abs(image_ids[idx]), images)
                 tn.append(global_match)
                 #print_column_entry(' - Neighbor {} match'.format(i+1), '{:.1f}%'.format(global_match))
             print_column_entry(' - # Neighbors with match > 0', '{}'.format(len([i for i in tn if i > 0.0])))
@@ -555,6 +612,7 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         else:
             cluster_query = [[image_ids[indices[query_id][i]] for i in range(args.n_neighbors)]]
         t = time.time() - t
+        #print_column_entry('Global neighbor ids', str(cluster_query))
         print_column_entry(' - Clustered neighbors', time_to_str(t))
 
 
@@ -586,7 +644,7 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         if len(matched_keypoints) < 5:
             warnings.warn('Number of matched points too little. Lowering matching threshold recommended.')
             continue
-        if args.verify and args.local_method == 'Colmap':
+        if args.verify is not None and args.local_method == 'Colmap':
             sci = correct+incorrect
             correct_prct = 100.0*(correct/float(sci)) if sci > 0 else 0.0
             local_matching_rate.append(correct_prct)
@@ -597,6 +655,8 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
 
         ## Calculate pose
         t = time.time()
+        if 'Augmented' in query_path:
+            query_path = query_path.replace('data/AachenDayNight/AugmentedNightImages_high_res/', 'db/').replace('.png', '.jpg')
         cm = camera_matrices[query_path]
         camera_matrix = cm['cameraMatrix']
         distortion_coeff = cm['rad_dist']
@@ -607,16 +667,22 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             iterationsCount=args.n_iter, reprojectionError=args.reproj_error,
             flags=cv2.SOLVEPNP_P3P)
 
-        if success:
+        if inliers is not None:
             inliers = inliers[:, 0] if len(inliers.shape) > 1 else inliers
             num_inliers = len(inliers)
             inlier_ratio = len(inliers) / len(matched_keypoints)
-            inlier_rates.append(100.0*inlier_ratio)
-            print_column_entry(' - Inlier ratio', '{:.1f}%'.format(100.0*inlier_ratio))
-            success &= num_inliers >= args.min_inliers
-            #if inlier_ratio < 0.05:
-            #    warnings.warn('Very low inlier ratio')
+        else:
+            num_inliers = 0
+            inlier_ratio = 0
+        inlier_rates.append(100.0*inlier_ratio)
+        inlier_nums.append(num_inliers)
+        print_column_entry(' - Inlier ratio', '{:.1f}%'.format(100.0*inlier_ratio))
+        print_column_entry(' - Inliers total', num_inliers)
+        success &= num_inliers >= args.min_inliers
+        #if inlier_ratio < 0.05:
+        #    warnings.warn('Very low inlier ratio')
 
+        if success:
             ret, R_vec, t = cv2.solvePnP(
                         matched_pts_xyz[inliers], matched_keypoints[inliers], camera_matrix,
                         dist_vec, rvec=R_vec, tvec=translation, useExtrinsicGuess=True,
@@ -633,19 +699,23 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         quat = list(Quaternion(matrix=query_T_w)) # rotmat2qvec(w_T_query[:3,:3])
         print_column_entry(' - Calculated position', position)
 
-        if args.verify:
-            gt = colmap_image_to_pose(images[query_image_ids[query_id]])[:3,3]
-            rotation = images[query_image_ids[query_id]].qvec
+        if args.verify is not None:
+            gt = colmap_image_to_pose(images[abs(query_image_ids[query_id])])[:3,3]
+            rotation = images[abs(query_image_ids[query_id])].qvec
             error_rot = quaternion_angular_error(rotation, quat)
             error = np.linalg.norm(position-gt)
             error_str = '%.1f m'%error if error > 1e-1 else '%.1f cm'%(100.0*error)
             errors.append(error)
             errors_rot.append(error_rot)
             print_column_entry(' - Groundtruth', gt)
+            if error > 5.0 or error_rot > 10.0:
+                print(bcolors.FAIL, end='')
             print_column_entry(' - Translation error', error_str)
             print_column_entry(' - Angular error', '{:.2f}°'.format(error_rot))
+            if error > 5.0 or error_rot > 10.0:
+                print(bcolors.ENDC, end='')
 
-            out_file.write('{} Error: {} CalcPos: {}\n'.format(name, error, position))
+            #out_file.write('{} Error: {} CalcPos: {}\n'.format(name, error, position))
         else:
             if not success:
                 warnings.warn('Localization not successful!')
@@ -656,28 +726,33 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         print_column_entry('Finished image {}/{}'.format(query_id+1, len(query_images)), time_to_str(individual_image_time))
         print_seperator()
         image_times.append(individual_image_time)
-    return image_times, np.array(errors), np.array(errors_rot), np.array(top_neighbor_match), np.array(local_matching_rate), np.array(inlier_rates)
+    return image_times, np.array(errors), np.array(errors_rot), np.array(top_neighbor_match), np.array(local_matching_rate), np.array(inlier_rates), np.array(inlier_nums)
 
 
 
-def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neighbor_match, local_matching_rate, inlier_rates):
+def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neighbor_match, local_matching_rate, inlier_rates, inlier_nums):
     print('Stats')
     print_column_entry('Setup time', time_to_str(setup_time))
     print_column_entry('Average time per image', time_to_str(np.mean(image_times)))
     print_column_entry('Median time per image', time_to_str(np.median(image_times)))
     print_column_entry('Max image time', time_to_str(np.max(image_times)))
     print_seperator()
-    if args.verify:
+    if args.verify is not None:
+        out_file.write(str(args))
+        out_file.write('\n')
+        
+        
         print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors)))
         print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors)))
         print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors)))
         print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot)))
         print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot)))
         print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot)))
-        print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate)))
-        print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates)))
-        print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates)))
-        print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates)))
+        if args.local_method == 'Colmap':
+            print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate)))
+        print_column_entry('Average inlier rate', '{:.1f}% / Total average: {}'.format(np.mean(inlier_rates), np.mean(inlier_nums)))
+        print_column_entry('Min inlier rate', '{:.1f}% / Total min: {}'.format(np.min(inlier_rates), np.min(inlier_nums)))
+        print_column_entry('Max inlier rate', '{:.1f}% / Total max: {}'.format(np.max(inlier_rates), np.max(inlier_nums)))
         print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors, errors_rot)))
         
 
@@ -687,10 +762,11 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
         out_file.write('Mean angular error\t{:.4f} °\n'.format(np.mean(errors_rot)))
         out_file.write('Median angular error\t{:.4f} °\n'.format(np.median(errors_rot)))
         out_file.write('Max angular error\t{:.4f} °\n'.format(np.max(errors_rot)))
-        out_file.write('Average local matching rate\t{:.1f}%\n'.format(np.mean(local_matching_rate)))
-        out_file.write('Average inlier rate\t{:.1f}%\n'.format(np.mean(inlier_rates)))
-        out_file.write('Min inlier rate\t{:.1f}%\n'.format(np.min(inlier_rates)))
-        out_file.write('Max inlier rate\t{:.1f}%\n'.format(np.max(inlier_rates)))
+        if args.local_method == 'Colmap':
+            out_file.write('Average local matching rate\t{:.1f}%\n'.format(np.mean(local_matching_rate)))
+        out_file.write('Average inlier rate\t{:.1f}% / Total average: {}\n'.format(np.mean(inlier_rates), np.mean(inlier_nums)))
+        out_file.write('Min inlier rate\t{:.1f}% / Total min: {}\n'.format(np.min(inlier_rates), np.min(inlier_nums)))
+        out_file.write('Max inlier rate\t{:.1f}% / Total max: {}\n'.format(np.max(inlier_rates), np.max(inlier_nums)))
         out_file.write('Percentage results\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors, errors_rot)))
         
         if top_neighbor_match.max(axis=1).shape[0] > 0:
@@ -704,10 +780,11 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
                 print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[valid])))
                 print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[valid])))
                 print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[valid])))
-                print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
-                print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[valid])))
-                print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[valid])))
-                print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[valid])))
+                if args.local_method == 'Colmap':
+                    print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
+                print_column_entry('Average inlier rate', '{:.1f}% / Total average: {}'.format(np.mean(inlier_rates[valid]), np.mean(inlier_nums[valid])))
+                print_column_entry('Min inlier rate', '{:.1f}% / Total min: {}'.format(np.min(inlier_rates[valid]), np.min(inlier_nums[valid])))
+                print_column_entry('Max inlier rate', '{:.1f}% / Total max: {}'.format(np.max(inlier_rates[valid]), np.max(inlier_nums[valid])))
                 print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors[valid], errors_rot[valid])))
                 out_file.write('Mean translational error good neighbors filtered\t{:.4f} m\n'.format(np.mean(errors[valid])))
                 out_file.write('Median translational error good neighbors filtered\t{:.4f} m\n'.format(np.median(errors[valid])))
@@ -715,10 +792,11 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
                 out_file.write('Mean angular error good neighbors filtered\t{:.4f} °\n'.format(np.mean(errors_rot[valid])))
                 out_file.write('Median angular error good neighbors filtered\t{:.4f} °\n'.format(np.median(errors_rot[valid])))
                 out_file.write('Max angular error good neighbors filtered\t{:.4f} °\n'.format(np.max(errors_rot[valid])))
-                out_file.write('Average local matching rate good neighbors filtered\t{:.1f}%\n'.format(np.mean(local_matching_rate[valid])))
-                out_file.write('Average inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.mean(inlier_rates[valid])))
-                out_file.write('Min inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.min(inlier_rates[valid])))
-                out_file.write('Max inlier rate good neighbors filtered\t{:.1f}%\n'.format(np.max(inlier_rates[valid])))
+                if args.local_method == 'Colmap':
+                    out_file.write('Average local matching rate good neighbors filtered\t{:.1f}%\n'.format(np.mean(local_matching_rate[valid])))
+                out_file.write('Average inlier rate good neighbors filtered\t{:.1f}% / Total average: {}\n'.format(np.mean(inlier_rates[valid]), np.mean(inlier_nums[valid])))
+                out_file.write('Min inlier rate good neighbors filtered\t{:.1f}% / Total min: {}\n'.format(np.min(inlier_rates[valid]), np.min(inlier_nums[valid])))
+                out_file.write('Max inlier rate good neighbors filtered\t{:.1f}% / Total max: {}\n'.format(np.max(inlier_rates[valid]), np.max(inlier_nums[valid])))
                 out_file.write('Percentage results good neighbors filtered\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors[valid], errors_rot[valid])))
             else:
                 print_column_entry('No images found (good neighbors)', '')
@@ -731,10 +809,11 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
                 print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[~valid])))
                 print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[~valid])))
                 print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[~valid])))
-                print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[~valid])))
-                print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[~valid])))
-                print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[~valid])))
-                print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[~valid])))
+                if args.local_method == 'Colmap':
+                    print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[~valid])))
+                print_column_entry('Average inlier rate', '{:.1f}% / Total average: {}'.format(np.mean(inlier_rates[~valid]), np.mean(inlier_nums[~valid])))
+                print_column_entry('Min inlier rate', '{:.1f}% / Total min: {}'.format(np.min(inlier_rates[~valid]), np.min(inlier_nums[~valid])))
+                print_column_entry('Max inlier rate', '{:.1f}% / Total max: {}'.format(np.max(inlier_rates[~valid]), np.max(inlier_nums[~valid])))
                 print_column_entry('Percentage results', '{:.1f} / {:.1f} / {:.1f}'.format(*percentage_stats(errors[~valid], errors_rot[~valid])))
                 out_file.write('Mean translational error bad neighbors filtered\t{:.4f} m\n'.format(np.mean(errors[~valid])))
                 out_file.write('Median translational error bad neighbors filtered\t{:.4f} m\n'.format(np.median(errors[~valid])))
@@ -742,10 +821,11 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
                 out_file.write('Mean angular error bad neighbors filtered\t{:.4f} °\n'.format(np.mean(errors_rot[~valid])))
                 out_file.write('Median angular error bad neighbors filtered\t{:.4f} °\n'.format(np.median(errors_rot[~valid])))
                 out_file.write('Max angular error bad neighbors filtered\t{:.4f} °\n'.format(np.max(errors_rot[~valid])))
-                out_file.write('Average local matching rate bad neighbors filtered\t{:.1f}%\n'.format(np.mean(local_matching_rate[~valid])))
-                out_file.write('Average inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.mean(inlier_rates[~valid])))
-                out_file.write('Min inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.min(inlier_rates[~valid])))
-                out_file.write('Max inlier rate bad neighbors filtered\t{:.1f}%\n'.format(np.max(inlier_rates[~valid])))
+                if args.local_method == 'Colmap':
+                    out_file.write('Average local matching rate bad neighbors filtered\t{:.1f}%\n'.format(np.mean(local_matching_rate[~valid])))
+                out_file.write('Average inlier rate bad neighbors filtered\t{:.1f}% / Total average: {}\n'.format(np.mean(inlier_rates[~valid]), np.mean(inlier_nums[~valid])))
+                out_file.write('Min inlier rate bad neighbors filtered\t{:.1f}% / Total min: {}\n'.format(np.min(inlier_rates[~valid]), np.min(inlier_nums[~valid])))
+                out_file.write('Max inlier rate bad neighbors filtered\t{:.1f}% / Total max: {}\n'.format(np.max(inlier_rates[~valid]), np.max(inlier_nums[~valid])))
                 out_file.write('Percentage results bad neighbors filtered\t{:.1f} / {:.1f} / {:.1f}\n'.format(*percentage_stats(errors[~valid], errors_rot[~valid])))
             else:
                 print_column_entry('No images found (bad neighbors)', '')
@@ -764,10 +844,11 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
             print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[valid])))
             print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[valid])))
             print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[valid])))
-            print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
-            print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[valid])))
-            print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[valid])))
-            print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[valid])))
+            if args.local_method == 'Colmap':
+                print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
+            print_column_entry('Average inlier rate', '{:.1f}% / Total average: {}'.format(np.mean(inlier_rates[valid]), np.mean(inlier_nums[valid])))
+            print_column_entry('Min inlier rate', '{:.1f}% / Total min: {}'.format(np.min(inlier_rates[valid]), np.min(inlier_nums[valid])))
+            print_column_entry('Max inlier rate', '{:.1f}% / Total max: {}'.format(np.max(inlier_rates[valid]), np.max(inlier_nums[valid])))
             print_column_entry('Average correct neighbors', '{:.1f}'.format(np.mean(nbs[valid])))
             print_column_entry('Min correct neighbors', '{:.1f}'.format(np.min(nbs[valid])))
             print_column_entry('Max correct neighbors', '{:.1f}'.format(np.max(nbs[valid])))
@@ -775,22 +856,69 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
             print_column_entry('No images found (fine localized)', '')
             
         print_seperator()
-        valid = np.logical_and(errors > 5.0, errors_rot > 10.0)
+        valid = np.logical_or(errors > 5.0, errors_rot > 10.0)
         if np.any(valid):
-            print_column_entry('Filtered by wrongly localized results', '{} images'.format(errors[valid].shape[0]))
+            print_column_entry('Filtered by wrongly localized results', '{} images'.format(np.sum(valid)))
             print_column_entry('Mean translational error', '{:.4f} m'.format(np.mean(errors[valid])))
             print_column_entry('Median translational error', '{:.4f} m'.format(np.median(errors[valid])))
             print_column_entry('Max translational error', '{:.4f} m'.format(np.max(errors[valid])))
             print_column_entry('Mean angular error', '{:.4f} °'.format(np.mean(errors_rot[valid])))
             print_column_entry('Median angular error', '{:.4f} °'.format(np.median(errors_rot[valid])))
             print_column_entry('Max angular error', '{:.4f} °'.format(np.max(errors_rot[valid])))
-            print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
-            print_column_entry('Average inlier rate', '{:.1f}%'.format(np.mean(inlier_rates[valid])))
-            print_column_entry('Min inlier rate', '{:.1f}%'.format(np.min(inlier_rates[valid])))
-            print_column_entry('Max inlier rate', '{:.1f}%'.format(np.max(inlier_rates[valid])))
+            if args.local_method == 'Colmap':
+                print_column_entry('Average local matching rate', '{:.1f}%'.format(np.mean(local_matching_rate[valid])))
+            print_column_entry('Average inlier rate', '{:.1f}% / Total average: {}'.format(np.mean(inlier_rates[valid]), np.mean(inlier_nums[valid])))
+            print_column_entry('Min inlier rate', '{:.1f}% / Total min: {}'.format(np.min(inlier_rates[valid]), np.min(inlier_nums[valid])))
+            print_column_entry('Max inlier rate', '{:.1f}% / Total max: {}'.format(np.max(inlier_rates[valid]), np.max(inlier_nums[valid])))
             print_column_entry('Average correct neighbors', '{:.1f}'.format(np.mean(nbs[valid])))
             print_column_entry('Min correct neighbors', '{:.1f}'.format(np.min(nbs[valid])))
             print_column_entry('Max correct neighbors', '{:.1f}'.format(np.max(nbs[valid])))
+            
+            print_seperator()
+            print_column_entry('Identifying reasons', '{} total'.format(np.sum(valid)))
+            out_file.write('Wrongly localized images: \n')
+            ## bad neighbors
+            bn = np.logical_and(~(top_neighbor_match.max(axis=1) > 0.0), valid)
+            print_column_entry(' - by wrong neighbors', np.sum(bn))
+            out_file.write(' - by wrong global neighbors:')
+            if np.sum(bn) > 0:
+                for img in np.array(query_images)[bn]:
+                    out_file.write(' {},'.format(os.path.split(img)[-1].replace('.jpg', '')))
+                out_file.write('\n')
+            else:
+                out_file.write(' None\n')
+            ## few inliers
+            out_file.write(' - by few inliers:')
+            fi = np.logical_and(np.logical_and(inlier_nums < 12, valid), ~bn)
+            print_column_entry(' - by few inliers (<12)', np.sum(fi))
+            if np.sum(fi) > 0:
+                for img in np.array(query_images)[fi]:
+                    out_file.write(' {},'.format(os.path.split(img)[-1].replace('.jpg', '')))
+                out_file.write('\n')
+            else:
+                out_file.write(' None\n')
+            ## low inlier rate
+            out_file.write(' - by low inlier rate:')
+            li = np.logical_and(np.logical_and(inlier_rates < 10, valid), np.logical_and(~fi, ~bn))
+            print_column_entry(' - by low inlier rate (<10%)', np.sum(li))
+            if np.sum(li) > 0:
+                for img in np.array(query_images)[li]:
+                    out_file.write(' {},'.format(os.path.split(img)[-1].replace('.jpg', '')))
+                out_file.write('\n')
+            else:
+                out_file.write(' None\n')
+            ## other
+            out_file.write(' - other:')
+            ot = np.logical_and(np.logical_and(np.logical_and(valid, ~li), ~fi), ~bn)
+            print_column_entry(' - other', np.sum(ot))
+            if np.sum(ot) > 0:
+                for img in np.array(query_images)[ot]:
+                    out_file.write(' {}, '.format(os.path.split(img)[-1].replace('.jpg', '')))
+                out_file.write('\n')
+            else:
+                out_file.write(' None\n')
+            
+            
         else:
             print_column_entry('No images found (wrong localized)', '')
         
@@ -804,6 +932,6 @@ if __name__ == '__main__':
     points3d, images, database_cursor, query_cursor, img_cluster, camera_matrices, query_images, query_image_ids, setup_time = setup(args)
     indices, image_ids = global_neighbors(args, query_images)
     out_file = open(args.out_file, 'w', buffering=1)
-    image_times, errors, errors_rot, top_neighbor_match, local_matching_rate, inlier_rates = local_matching(args, points3d, images, database_cursor, query_cursor, img_cluster, camera_matrices, query_images, query_image_ids, indices, image_ids, out_file)   
-    stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neighbor_match, local_matching_rate, inlier_rates)
+    image_times, errors, errors_rot, top_neighbor_match, local_matching_rate, inlier_rates, inlier_nums = local_matching(args, points3d, images, database_cursor, query_cursor, img_cluster, camera_matrices, query_images, query_image_ids, indices, image_ids, out_file)   
+    stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neighbor_match, local_matching_rate, inlier_rates, inlier_nums)
     out_file.close()

@@ -16,10 +16,11 @@ from models.cirtorch_utils.datahelpers import default_loader, imresize
 class PCDataLoader(data.DataLoader):
     
     def __collate__(self, data_list, follow_batch=[]):
-        anchs = torch.stack([d[0] for d in data_list])
-        pos = GeoBatch.from_data_list([GeoData(pos=d[1]) for d in data_list], follow_batch)
-        negs = GeoBatch.from_data_list([GeoData(pos=d[2]) for d in data_list], follow_batch)
-        return [anchs, pos, negs]
+        img_pos = torch.stack([d[0] for d in data_list])
+        pt_pos = GeoBatch.from_data_list([GeoData(pos=d[1]) for d in data_list], follow_batch)
+        img_negs = torch.stack([d[2] for d in data_list])
+        pt_negs = GeoBatch.from_data_list([GeoData(pos=d[3]) for d in data_list], follow_batch)
+        return [img_pos, pt_pos, img_negs, pt_negs]
     
     def __init__(self,
                  dataset,
@@ -114,17 +115,26 @@ class PointCloudImagesFromList(data.Dataset):
         
         if self.triplet: # return point cloud with little overlap for negative triplet loss
             while True:
-                trp_idx = random.choice(self.image_ids)
+                j = random.randint(0, len(self.image_ids) - 1) # random.choice(enumerate(self.image_ids))
+                trp_idx = self.image_ids[j]
                 valid_trp = self.images[trp_idx].point3D_ids > 0
                 pt_ids_trp = self.images[trp_idx].point3D_ids[valid_trp]
                 shared = np.intersect1d(pt_ids, pt_ids_trp, assume_unique=True)
                 if shared.shape[0] < pt_ids.shape[0] * 0.01:
                     break
             pts_trp = torch.from_numpy(np.stack([self.points3d[i].xyz for i in pt_ids_trp]))
+            path_trp = self.images_fn[j]
+            img_trp = self.loader(path_trp)
+            imfullsize_trp = max(img_trp.size)
+            if self.imsize is not None:
+                img_trp = imresize(img_trp, self.imsize)
+
+            if self.transform is not None:
+                img_trp = self.transform(img_trp)
         else:
             pts_trp = None
 
-        return [img, pts.float(), pts_trp.float()] # {'anchor':img, 'pos':pts, 'neg':pts_trp}
+        return [img, pts.float(), img_trp, pts_trp.float()] # {'anchor':img, 'pos':pts, 'neg':pts_trp}
     
     def __len__(self):
         return len(self.images_fn)
