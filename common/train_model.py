@@ -203,8 +203,8 @@ def step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, optim, train=True):
     if len(data[0].size()) <= 3:
         data[0] = data[0].unsqueeze(0)
         data[2] = data[2].unsqueeze(0)
-    img_pos = cnn2d(data[0]).transpose(0,1)
-    img_neg = cnn2d(data[2]).transpose(0,1)
+    img_pos = cnn2d(data[0])
+    img_neg = cnn2d(data[2])
     #Data(pos=torch.Tensor(10, 3), batch=torch.LongTensor([0]*10))
     pt_pos = ptnet(data[1])
     pt_neg = ptnet(data[3])

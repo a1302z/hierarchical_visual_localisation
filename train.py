@@ -16,6 +16,7 @@ import random
 
 from models.cirtorch_utils.genericdataset import PointCloudImagesFromList, PointCloudSplit, PCDataLoader
 from dataset_loaders.txt_to_db import get_images, get_points
+from models.decoder import DecoderV2
 
 import models.pointnet2_classification as ptnet
 from models.cirtorch_network import init_network, extract_vectors
@@ -31,6 +32,7 @@ parser.add_argument('--device', default='0', help='Specify computing device')
 parser.add_argument('--hostname', default='localhost', help='Hostname for visdom logging')
 parser.add_argument('--port', default=8833, help='Port for visdom logging')
 parser.add_argument('--exp_name', default='Experiment', help='Define experiment name')
+parser.add_argument('--decode', action='store_true', help='Use autoencoder/decoder as additional model part')
 args = parser.parse_args()
 
 
@@ -58,6 +60,7 @@ if args.dataset == 'Aachen':
        std=stats[1]
     )
     transform = transforms.Compose([
+        transforms.Resize(cp['DataParams'].getint('input_size', 1024)),
         transforms.CenterCrop(cp['DataParams'].getint('input_size', 1024)),
         transforms.ToTensor(),
         normalize
@@ -96,12 +99,14 @@ elif args.dataset == 'MNIST': ## this was for validating training pipeline
 #print(model.pt)
 pointnet = ptnet.NetAachen()
 cir = init_network({'architecture' : 'resnet34'})
+decoder = DecoderV2(input_size=512) if args.decode else None
 
 
 ## Start training
 train_model.train_triplet(pointnet, cir, dataloader, cp, args,
                             device = args.device, hostname=args.hostname, port=args.port,
-                            exp_name = args.exp_name, val_set = val_loader if do_val else None
+                            exp_name = args.exp_name, val_set = val_loader if do_val else None,
+                            decoder = decoder
                             )
 
 

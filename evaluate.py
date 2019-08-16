@@ -244,7 +244,22 @@ def get_img_cluster(images, points3d):
             img_cluster[img_id] |= img_ids
     return img_cluster
 
-def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, extractor, matcher, refilter=False):
+def double_matching(local_matcher, query_desc, neighbor_desc):
+    matches_forward = local_matcher.match(query_desc, neighbor_desc)
+    matches_reverse = local_matcher.match(neighbor_desc, query_desc)
+    if matches_forward.shape[0] == 0 or matches_reverse.shape[0] == 0:
+        return np.array([])
+    #print(matches_forward.shape)
+    #print(matches_reverse.shape)
+    matches = []
+    mr = list(matches_reverse[:,1])
+    for m in matches_forward:
+        if m[0] in mr:
+            matches.append(m)
+    matches = np.array(matches)
+    return matches
+
+def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, extractor, matcher, refilter=False, double=False):
     cuda = torch.cuda.is_available()
     matched_kpts_cv = []
     matched_pts = []
@@ -290,7 +305,10 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
                 #data_desc = np.frombuffer(desc, dtype=np.float32).reshape(cols, 256)
             if 'approx' in mm:
                 data_desc = to_unit_vector(data_desc, method=mm, cuda=cuda)
-            matches = matcher.match(query_desc, data_desc)
+            if double:
+                matches = double_matching(matcher, query_desc, data_desc)
+            else:
+                matches = matcher.match(query_desc, data_desc)
             if type(data_desc) is torch.Tensor:
                 data_desc = data_desc.cpu().numpy()
             if matches.shape[0] > 1:
@@ -307,7 +325,10 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
     if refilter:
         if 'approx' in mm:
             data_descs = to_unit_vector(data_descs, method=mm, cuda=cuda)
-        matches = matcher.match(query_desc, data_descs)
+        if double:
+            matches = double_matching(matcher, query_desc, data_descs)
+        else:
+            matches = matcher.match(query_desc, data_descs)
     if matches.shape[0] > 1: ## at least two matches to be considered
         if refilter:
             matched_kpts_cv = [query_kpts[m[0]] for m in matches]

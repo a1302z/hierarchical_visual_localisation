@@ -117,7 +117,7 @@ class ImageRetrievalNet(nn.Module):
             o = self.norm(self.whiten(o))
 
         # permute so that it is Dx1 column vector per image (DxN if many images)
-        return o.permute(1,0)
+        return o.squeeze(0) #.permute(1,0)
 
     def __repr__(self):
         tmpstr = super(ImageRetrievalNet, self).__repr__()[:-1]
