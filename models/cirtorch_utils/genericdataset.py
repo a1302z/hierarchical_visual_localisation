@@ -18,8 +18,12 @@ class PCDataLoader(data.DataLoader):
     def __collate__(self, data_list, follow_batch=[]):
         img_pos = torch.stack([d[0] for d in data_list])
         pt_pos = GeoBatch.from_data_list([GeoData(pos=d[1]) for d in data_list], follow_batch)
-        img_negs = torch.stack([d[2] for d in data_list])
-        pt_negs = GeoBatch.from_data_list([GeoData(pos=d[3]) for d in data_list], follow_batch)
+        if data_list[0][2] is not None:
+            img_negs = torch.stack([d[2] for d in data_list])
+            pt_negs = GeoBatch.from_data_list([GeoData(pos=d[3]) for d in data_list], follow_batch)
+        else:
+            img_negs = None
+            pt_negs = None
         return [img_pos, pt_pos, img_negs, pt_negs]
     
     def __init__(self,
@@ -68,13 +72,31 @@ class PointCloudImagesFromList(data.Dataset):
     Based on ImagesFromList
     """
     def __init__(self, root, images, points3d, imsize=None, transform=None, loader=default_loader, triplet=False, 
-                min_num_points=100):
+                min_num_points=100, overfit=-1, max_std_std=0.1, within_std = 1.0, demean=True, deterministic=False):
         self.image_ids = []
         self.images_fn = []
+        self.overfit = overfit
+        self.max_std_std = max_std_std
+        self.within_std = within_std
+        self.demean = demean
+        self.deterministic = deterministic
         for i, img in enumerate(images.keys()):
+            if overfit > 0 and i > overfit:
+                break
             valid = images[img].point3D_ids > 0
-            valid = valid.sum()
-            if valid > min_num_points:
+            if self.max_std_std < float('inf'):                
+                pt_ids = images[img].point3D_ids[valid]
+                pts = np.stack([points3d[i].xyz for i in pt_ids])
+                mean, std = np.mean(pts, axis=0), np.std(pts, axis=0)
+                if self.within_std > 0:
+                    valid_pts = np.all(np.abs(pts - mean) < self.within_std*std, axis=1)
+                    pts = pts[valid_pts]
+                std = np.std(pts, axis=0)
+                std_std = np.std(std) / np.mean(std) ##normalize std
+                if std_std > self.max_std_std:
+                    continue
+            num_valid = valid.sum()
+            if num_valid > min_num_points:
                 self.image_ids.append(img)
                 self.images_fn.append(os.path.join(root,images[img].name))
         #self.image_ids = {i : k for i, k in enumerate(images.keys())}
@@ -111,9 +133,19 @@ class PointCloudImagesFromList(data.Dataset):
         img_idx = self.image_ids[index]
         valid = self.images[img_idx].point3D_ids > 0
         pt_ids = self.images[img_idx].point3D_ids[valid]
-        pts = torch.from_numpy(np.stack([self.points3d[i].xyz for i in pt_ids]))
+        pts = np.stack([self.points3d[i].xyz for i in pt_ids])
+        mean, std = np.mean(pts, axis=0), np.std(pts, axis=0)
+        if self.within_std > 0:
+            valid_pts = np.all(np.abs(pts - mean) < self.within_std*std, axis=1)
+            pts = pts[valid_pts]
+        if self.demean:
+            pts -= np.mean(pts, axis=0)
+            pts /= np.std(pts, axis=0) 
+        pts = torch.from_numpy(pts)
         
         if self.triplet: # return point cloud with little overlap for negative triplet loss
+            if self.deterministic:
+                random.seed(index)
             while True:
                 j = random.randint(0, len(self.image_ids) - 1) # random.choice(enumerate(self.image_ids))
                 trp_idx = self.image_ids[j]
@@ -122,7 +154,15 @@ class PointCloudImagesFromList(data.Dataset):
                 shared = np.intersect1d(pt_ids, pt_ids_trp, assume_unique=True)
                 if shared.shape[0] < pt_ids.shape[0] * 0.01:
                     break
-            pts_trp = torch.from_numpy(np.stack([self.points3d[i].xyz for i in pt_ids_trp]))
+            pts_trp = np.stack([self.points3d[i].xyz for i in pt_ids_trp])
+            mean, std = np.mean(pts_trp, axis=0), np.std(pts_trp, axis=0)
+            if self.within_std > 0:
+                valid_pts = np.all(np.abs(pts_trp - mean) < self.within_std*std, axis=1)
+                pts_trp = pts_trp[valid_pts]
+            if self.demean:
+                pts_trp -= np.mean(pts_trp, axis=0)
+                pts_trp /= np.std(pts_trp, axis=0) 
+            pts_trp = torch.from_numpy(pts_trp).float()
             path_trp = self.images_fn[j]
             img_trp = self.loader(path_trp)
             imfullsize_trp = max(img_trp.size)
@@ -133,8 +173,9 @@ class PointCloudImagesFromList(data.Dataset):
                 img_trp = self.transform(img_trp)
         else:
             pts_trp = None
+            img_trp = None
 
-        return [img, pts.float(), img_trp, pts_trp.float()] # {'anchor':img, 'pos':pts, 'neg':pts_trp}
+        return [img, pts.float(), img_trp, pts_trp] # {'anchor':img, 'pos':pts, 'neg':pts_trp}
     
     def __len__(self):
         return len(self.images_fn)

@@ -6,6 +6,7 @@ from evaluate import get_files, time_to_str
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--database_dir', default='data/AachenDayNight/images_upright/db', help='Specify where images are stored')
+parser.add_argument('--img_format', default='.jpg', help='Image format ending')
 parser.add_argument('--save_file', default='data/img_stats.txt', help='Where to store results')
 parser.add_argument('--print_chunk', type=float, default=10, help='Print after every completed nth chunk of dataset')
 parser.add_argument('--overfit', type=int, default=None, help='Reduce num images for testing')
@@ -14,7 +15,7 @@ args = parser.parse_args()
 
 t = time.time()
 
-img_names = get_files(args.database_dir, '*.jpg')
+img_names = get_files(args.database_dir, '*'+args.img_format)
 images = ImagesFromList('', img_names)
 
 ns, ms, ss = [], [], []

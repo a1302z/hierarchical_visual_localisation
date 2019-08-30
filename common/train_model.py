@@ -3,12 +3,15 @@ import os
 import visdom
 import shutil
 import numpy as np
+from math import log
 import time
 from datetime import timedelta
 
 from common.utils import VisdomLinePlotter
 
 from torch_geometric.data import Data
+
+from common.scheduler import LearningRateScheduler
 
 
 def train_triplet(ptnet, cnn2d, dataset, config, args, **kwargs):
@@ -66,7 +69,10 @@ def train_triplet(ptnet, cnn2d, dataset, config, args, **kwargs):
     ## Training params
     #loss_fn = torch.nn.CrossEntropyLoss()
     loss_fn = torch.nn.TripletMarginLoss(margin=config['Hyperparams'].getfloat('loss_margin', 1.0))
-    optim = torch.optim.Adam(list(ptnet.parameters()) + list(cnn2d.parameters()), lr=hyper_params.getfloat('lr', 1e-3))
+    start_lr = hyper_params.getfloat('lr', 1e-3)
+    end_lr = hyper_params.getfloat('end_lr', start_lr)
+    scheduler = LearningRateScheduler(n_epochs, log(start_lr, 10), log(end_lr, 10), schedule_plan=hyper_params.get('schedule_plan', 'log_linear'))
+    optim = torch.optim.Adam(list(ptnet.parameters()) + list(cnn2d.parameters()), lr=start_lr)
     
     ## Setup visdom logging
     use_visdom = logging_params.getboolean('visdom', False)
@@ -76,6 +82,17 @@ def train_triplet(ptnet, cnn2d, dataset, config, args, **kwargs):
             server = 'localhost' if 'hostname' not in kwargs else kwargs['hostname'], 
             port = 8097 if 'port' not in kwargs else kwargs['port'])
         plotter.add_plot('Loss', ['Train loss', 'Val Loss'], 'Loss')
+        plotter.add_plot('learningrate', ['learning rate'], 'learning rate', 
+                         opts = {
+                              'layoutopts': {
+                                'plotly': {
+                                  'yaxis': {
+                                    'type': 'log',
+                                  }
+                                }
+                              }
+                            }
+                        )
     
     ## Actual training
     ptnet.train()
@@ -140,12 +157,19 @@ def train_triplet(ptnet, cnn2d, dataset, config, args, **kwargs):
                 
             losses.append(loss.item())
             ## Logging 
+            float_epoch = float(epoch) + float(i)/float(n_samples)
             if i % (n_samples//log_division) == 0 and (epoch == 0 or i > 0):
                 m_loss = np.mean(losses)
                 print('\t%d/%d samples (Mean loss: %.3f)'%(i, n_samples, m_loss))
                 if use_visdom:
-                    plotter.plot('Loss', 'Train loss', float(epoch) + float(i)/float(n_samples), m_loss)
+                    plotter.plot('Loss', 'Train loss', float_epoch, m_loss)
                 losses = []
+            ## update learning rate
+            scheduler.adjust_learning_rate(optim, float_epoch)
+            if use_visdom:
+                plotter.plot('learningrate', 'learning rate', float_epoch, scheduler.get_lr(float_epoch),
+                            
+                            )
         t2 = time.time()
         print('\tTraining time: %s'%str(timedelta(seconds=t2-t1)))
                     
@@ -197,7 +221,9 @@ def step_feedfwd(model, data, target, loss_fn, optim, train=True):
         optim.step()
     return loss
 
-def step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, optim, train=True):
+torch_norm = lambda x: (x.transpose(0, 1) / torch.norm(x, p=2, dim=1)).transpose(0,1)
+
+def step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, optim, train=True, normalize=True):
     if train:
         optim.zero_grad()
     if len(data[0].size()) <= 3:
@@ -205,9 +231,16 @@ def step_feedfwd_triplet(ptnet, cnn2d, data, loss_fn, optim, train=True):
         data[2] = data[2].unsqueeze(0)
     img_pos = cnn2d(data[0])
     img_neg = cnn2d(data[2])
-    #Data(pos=torch.Tensor(10, 3), batch=torch.LongTensor([0]*10))
+    if len(img_pos.size()) == 1:
+        img_pos = img_pos.unsqueeze(0)
+        img_neg = img_neg.unsqueeze(0)
     pt_pos = ptnet(data[1])
     pt_neg = ptnet(data[3])
+    if normalize:
+        img_pos = torch_norm(img_pos)
+        img_neg = torch_norm(img_neg)
+        pt_pos = torch_norm(pt_pos)
+        pt_neg = torch_norm(pt_neg)
     #print('Shape anchor {}'.format(anchor.size()))
     #print('Shape pos {}'.format(pos.size()))
     #print('Shape neg {}'.format(neg.size()))

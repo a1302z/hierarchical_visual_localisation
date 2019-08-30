@@ -60,6 +60,8 @@ parser.add_argument('--dataset_dir', default='data/AachenDayNight/images_upright
 parser.add_argument('--overfit', default=None, type=int, help='Limit number of queries')
 parser.add_argument('--out_file', type=str, default='aachen_eval_.txt', help='Name of output file')
 parser.add_argument('--cluster', action='store_true', help='Create image cluster for all neighbors')
+parser.add_argument('--no_refilter', action='store_false', help='Refilter local matches')
+parser.add_argument('--bidirectional_filtering', action='store_true', help='Filter local matches in both directions')
 
 
 ## Taken from original hfnet repository
@@ -311,7 +313,7 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
                 matches = matcher.match(query_desc, data_desc)
             if type(data_desc) is torch.Tensor:
                 data_desc = data_desc.cpu().numpy()
-            if matches.shape[0] > 1:
+            if matches.shape[0] > 0:
                 if refilter:
                     pt_ids_all.append(pt_ids[matches[:,1]])
                     data_descs.append(data_desc[matches[:,1]])
@@ -319,18 +321,17 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
                     matched_kpts_cv += [query_kpts[m[0]] for m in matches]
                     matched_pts += [pt_ids[m[1]] for m in matches]
     if refilter:
-        pt_ids_all = np.concatenate(pt_ids_all)
-        data_descs = np.vstack(data_descs)
-    #print(data_descs.shape)
-    if refilter:
-        if 'approx' in mm:
-            data_descs = to_unit_vector(data_descs, method=mm, cuda=cuda)
-        if double:
-            matches = double_matching(matcher, query_desc, data_descs)
+        if len(pt_ids_all) < 1:
+            matches = np.array([])
         else:
-            matches = matcher.match(query_desc, data_descs)
-    if matches.shape[0] > 1: ## at least two matches to be considered
-        if refilter:
+            pt_ids_all = np.concatenate(pt_ids_all)
+            data_descs = np.vstack(data_descs)
+            if 'approx' in mm:
+                data_descs = to_unit_vector(data_descs, method=mm, cuda=cuda)
+            if double:
+                matches = double_matching(matcher, query_desc, data_descs)
+            else:
+                matches = matcher.match(query_desc, data_descs)
             matched_kpts_cv = [query_kpts[m[0]] for m in matches]
             matched_pts = [pt_ids_all[m[1]] for m in matches]
                     
@@ -341,8 +342,12 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
                             correct += 1
                         else:
                             incorrect += 1
-    matched_pts_xyz = np.stack([points3d[i].xyz for i in matched_pts])
-    matched_keypoints = np.vstack([np.array([x.pt[0], x.pt[1]]) for x in matched_kpts_cv])
+    if len(matched_pts) > 0:
+        matched_pts_xyz = np.stack([points3d[i].xyz for i in matched_pts])
+        matched_keypoints = np.vstack([np.array([x.pt[0], x.pt[1]]) for x in matched_kpts_cv])
+    else:
+        matched_pts_xyz = np.array([])
+        matched_keypoints = np.array([])
     if args.augmentation:
         print_column_entry(' - Augmented images used', augments)
     return matched_pts_xyz, matched_keypoints, correct, incorrect
@@ -378,9 +383,11 @@ def print_config(args):
     print_column_entry('Nearest neighbor method', args.nearest_method)
     if args.nearest_method == 'LSH':
         print_column_entry(' - hash buckets', 2**args.buckets)
+    print_column_entry('k neighbors', args.n_neighbors)
     print_column_entry('Do clustering', args.cluster)
     print_column_entry('Local matching method', args.local_matching_method)
-    print_column_entry('k neighbors', args.n_neighbors)
+    print_column_entry('Refilter', args.no_refilter)
+    print_column_entry('Bidirectional filtering', args.bidirectional_filtering)
     print_column_entry('Matching threshold', args.ratio_thresh)
     print_column_entry('Num iterations RANSAC', args.n_iter)
     print_column_entry('Reprojection error', args.reproj_error)
@@ -658,13 +665,13 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
 
         ## Matching
         t = time.time()
-        matched_pts_xyz, matched_keypoints, correct, incorrect = match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, extractor, matcher)
+        matched_pts_xyz, matched_keypoints, correct, incorrect = match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, extractor, matcher, refilter=args.no_refilter, double=args.bidirectional_filtering)
         t = time.time() - t
         print_column_entry(' - Number of matched points', matched_keypoints.shape[0])
         
-        if len(matched_keypoints) < 5:
-            warnings.warn('Number of matched points too little. Lowering matching threshold recommended.')
-            continue
+        #if len(matched_keypoints) < 5:
+        #    warnings.warn('Number of matched points too little. Lowering matching threshold recommended.')
+        #    continue
         if args.verify is not None and args.local_method == 'Colmap':
             sci = correct+incorrect
             correct_prct = 100.0*(correct/float(sci)) if sci > 0 else 0.0
@@ -682,11 +689,15 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
         camera_matrix = cm['cameraMatrix']
         distortion_coeff = cm['rad_dist']
         dist_vec = np.array([distortion_coeff, 0, 0, 0])
-
-        success, R_vec, translation, inliers = cv2.solvePnPRansac(
-            matched_pts_xyz, matched_keypoints, camera_matrix, dist_vec,
-            iterationsCount=args.n_iter, reprojectionError=args.reproj_error,
-            flags=cv2.SOLVEPNP_P3P)
+        
+        if matched_pts_xyz.shape[0] > 4:
+            success, R_vec, translation, inliers = cv2.solvePnPRansac(
+                matched_pts_xyz, matched_keypoints, camera_matrix, dist_vec,
+                iterationsCount=args.n_iter, reprojectionError=args.reproj_error,
+                flags=cv2.SOLVEPNP_P3P)
+        else:
+            inliers = None
+            success = False
 
         if inliers is not None:
             inliers = inliers[:, 0] if len(inliers.shape) > 1 else inliers
@@ -715,10 +726,10 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             query_T_w[:3, 3] = t[:, 0]
             w_T_query = np.linalg.inv(query_T_w)
 
-        name = os.path.split(query_name)[-1]
-        position = w_T_query[:3, 3]
-        quat = list(Quaternion(matrix=query_T_w)) # rotmat2qvec(w_T_query[:3,:3])
-        print_column_entry(' - Calculated position', position)
+            name = os.path.split(query_name)[-1]
+            position = w_T_query[:3, 3]
+            quat = list(Quaternion(matrix=query_T_w)) # rotmat2qvec(w_T_query[:3,:3])
+            print_column_entry(' - Calculated position', position)
 
         if args.verify is not None:
             gt = colmap_image_to_pose(images[abs(query_image_ids[query_id])])[:3,3]
@@ -738,10 +749,12 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
 
             #out_file.write('{} Error: {} CalcPos: {}\n'.format(name, error, position))
         else:
-            if not success:
-                warnings.warn('Localization not successful!')
-            position = -txq.rotate_vector(np.array(position), np.array(quat))
-            out_file.write('{} {} {} {} {} {} {} {}\n'.format(name, quat[0], quat[1], quat[2], quat[3], position[0], position[1], position[2]))
+            #if not success:
+            #    warnings.warn('Localization not successful!')
+            #position = -txq.rotate_vector(np.array(position), np.array(quat))
+            #out_file.write('{} {} {} {} {} {} {} {}\n'.format(name, quat[0], quat[1], quat[2], quat[3], position[0], position[1], position[2]))
+            errors.append(1000)    ## can be chosen arbitrarily
+            errors_rot.append(180) ## same here
 
         individual_image_time = time.time() - individual_image_time 
         print_column_entry('Finished image {}/{}'.format(query_id+1, len(query_images)), time_to_str(individual_image_time))
@@ -934,7 +947,7 @@ def stats(args, setup_time, image_times, errors, errors_rot, out_file, top_neigh
             print_column_entry(' - other', np.sum(ot))
             if np.sum(ot) > 0:
                 for img in np.array(query_images)[ot]:
-                    out_file.write(' {}, '.format(os.path.split(img)[-1].replace('.jpg', '')))
+                    out_file.write(' {}, '.format(''.join(list(filter(str.isdigit, os.path.split(img)[-1])))))
                 out_file.write('\n')
             else:
                 out_file.write(' None\n')
