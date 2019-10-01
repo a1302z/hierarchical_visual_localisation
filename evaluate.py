@@ -34,17 +34,18 @@ from dataset_loaders.utils import load_image
 from dataset_loaders.pose_utils import quaternion_angular_error
 import models.netvlad_vd16_pitts30k_conv5_3_max_dag as netvlad
 import models.demo_superpoint as superpoint
+from models.d2net.extract_features import d2net_interface
 from models.cirtorch_network import init_network, extract_vectors
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--global_method', default='Cirtorch', choices=['NetVLAD', 'Cirtorch'], help='Which method to use for global features')
-parser.add_argument('--local_method', default='Colmap', choices=['Colmap', 'Superpoint'], help='Which method to use for local features')
+parser.add_argument('--local_method', default='Colmap', choices=['Colmap', 'Superpoint', 'D2'], help='Which method to use for local features')
 parser.add_argument('--colmap_query_database', default='data/queries.db', help='Database to colmap sift features if colmap is used as local method')
 parser.add_argument('--database_path', default='data/AachenDayNight/aachen.db', help='Path to colmap database')
 parser.add_argument('--global_features_db', default='data/global_features_low_res.db', help='Database for global features of database images')
-#parser.add_argument('--superpoint_database', default='data/superpoint.db', help='If superpoint is used we need the database with precalculated descriptors') #currently deactivated because it is slower than calculating descriptor along the way
-parser.add_argument('--superpoint_model_path', default='data/teacher_models/superpoint_v1.pth', help='Path to pretrained superpoint model')
+parser.add_argument('--desc_database', default=None, help='If neural model (d2/superpoint) is used precalculated database descriptors speed everything up') 
+parser.add_argument('--local_model_path', default='data/teacher_models/superpoint_v1.pth', help='Path to pretrained local descriptor model')
 parser.add_argument('--nearest_method', default='approx', type = str, choices=['exact', 'LSH', 'approx'], help='Which method to use to find nearest global neighbors')
 parser.add_argument('--local_matching_method', default='approx', type=str, choices=['exact', 'approx'], help='How local features are matched. Approx only considers direction of feature vector but is much faster.')
 #parser.add_argument('--global_resolution', default=224, type=int, help='Resolution on which nearest global neighbors are calculated')
@@ -113,7 +114,7 @@ def descriptors_from_colmap_db(cursor, image_id):
 def keypoints_from_colmap_db(cursor, image_id):
     cursor.execute('SELECT cols, data FROM keypoints WHERE image_id=?;',(image_id,))
     cols, blob = next(cursor)
-    kpts = np.frombuffer(blob, dtype=np.float32).reshape(-1, cols)
+    kpts = np.frombuffer(blob, dtype=np.float32).reshape(-1, cols)[:, :2]
     return kpts
 
 def get_kpts_desc(cursor, image_id):
@@ -261,7 +262,7 @@ def double_matching(local_matcher, query_desc, neighbor_desc):
     matches = np.array(matches)
     return matches
 
-def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, extractor, matcher, refilter=False, double=False):
+def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, model, matcher, refilter=False, double=False, desc_database=None):
     cuda = torch.cuda.is_available()
     matched_kpts_cv = []
     matched_pts = []
@@ -289,18 +290,31 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
                 data_desc = descriptors_from_colmap_db(database_cursor, int(img))
                 #data_kpts = kpts_to_cv(data_kpts[valid[:data_kpts.shape[0]]] - 0.5)
                 data_desc = data_desc[valid[:data_desc.shape[0]]]
-            elif args.local_method == 'Superpoint':
+            elif args.local_method in ['Superpoint', 'D2']:
                 if img > 0:
                     path_to_img = 'data/AachenDayNight/images_upright/'+img_name
                 else:
                     path_to_img = 'data/AachenDayNight/AugmentedNightImages_high_res/'+img_name.replace('db/', '').replace('.jpg', '.png')
                     augments += 1
+                if desc_database is None:
+                    data_kpts = keypoints_from_colmap_db(database_cursor, abs(int(img)))
+                    data_kpts = data_kpts[valid[:data_kpts.shape[0]]] - 0.5
+                    if args.local_method == 'Superpoint':
+                        cv_img = cv2.imread(path_to_img, 0).astype(np.float32)/255.0
+                        _, data_desc, _ = model.run(cv_img, points=data_kpts)
+                        data_desc = data_desc.T
+                    elif args.local_method == 'D2':
+                        fixed_kpts = np.flip(data_kpts.copy(), axis=1)
+                        #print(fixed_kpts.shape)
+                        #print(fixed_kpts.max(axis=0))
+                        data_desc = model.get_features(path_to_img, fixed_kpts)
+                else:
+                    desc_database.execute('SELECT cols, desc FROM local_features WHERE image_id=?;', (abs(int(img)),))
+                    c, d = next(desc_database)
+                    data_desc = np.frombuffer(d, dtype=np.float32).reshape(c, -1)
                     
-                cv_img = cv2.imread(path_to_img, 0).astype(np.float32)/255.0
-                data_kpts = keypoints_from_colmap_db(database_cursor, abs(int(img)))
-                data_kpts = data_kpts[valid[:data_kpts.shape[0]]] - 0.5
-                _, data_desc, _ = extractor.run(cv_img, points=data_kpts)
-                data_desc = data_desc.T
+                        
+                #print('Query desc shape: {} \t Data desc shape: {}'.format(query_desc.shape, data_desc.shape))
                 ##database version
                 #superpoint_cursor.execute('SELECT cols, desc FROM local_features WHERE image_id==?;',(int(img),))
                 #cols, desc = next(superpoint_cursor)
@@ -311,6 +325,7 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
                 matches = double_matching(matcher, query_desc, data_desc)
             else:
                 matches = matcher.match(query_desc, data_desc)
+            #print('Found {} matches'.format(matches.shape[0]))
             if type(data_desc) is torch.Tensor:
                 data_desc = data_desc.cpu().numpy()
             if matches.shape[0] > 0:
@@ -321,13 +336,14 @@ def match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cl
                     matched_kpts_cv += [query_kpts[m[0]] for m in matches]
                     matched_pts += [pt_ids[m[1]] for m in matches]
     if refilter:
-        if len(pt_ids_all) < 1:
+        if len(pt_ids_all) < 1 or (len(data_descs) < 2):
             matches = np.array([])
         else:
             pt_ids_all = np.concatenate(pt_ids_all)
             data_descs = np.vstack(data_descs)
             if 'approx' in mm:
                 data_descs = to_unit_vector(data_descs, method=mm, cuda=cuda)
+            
             if double:
                 matches = double_matching(matcher, query_desc, data_descs)
             else:
@@ -377,9 +393,9 @@ def print_config(args):
     #if args.global_method == 'NetVLAD':
     #    print_column_entry('Global resolution', args.global_resolution)
     print_column_entry('Local method', args.local_method)
-    if args.local_method == 'Superpoint':
+    if args.local_method in ['Superpoint', 'D2']:
         #print_column_entry(' - Database', args.superpoint_database)
-        print_column_entry(' - Model', args.superpoint_model_path)
+        print_column_entry(' - Model', args.local_model_path)
     print_column_entry('Nearest neighbor method', args.nearest_method)
     if args.nearest_method == 'LSH':
         print_column_entry(' - hash buckets', 2**args.buckets)
@@ -587,7 +603,11 @@ Matches local features of query to cluster images and calculates 6dof pose
 """
 def local_matching(args, points3d, images, database_cursor, query_cursor, img_cluster, camera_matrices, query_images, query_image_ids, indices, image_ids, out_file):
     ## Local features matching and pose retrieval
-    extractor = superpoint.SuperPointFrontend(weights_path=args.superpoint_model_path,nms_dist=4, conf_thresh=0.015, nn_thresh=.7, cuda=torch.cuda.is_available()) if args.local_method == 'Superpoint' else None
+    model = None
+    if args.local_method == 'Superpoint':
+        model = superpoint.SuperPointFrontend(weights_path=args.local_model_path,nms_dist=4, conf_thresh=0.015, nn_thresh=.7, cuda=torch.cuda.is_available())
+    elif args.local_method == 'D2':
+        model = d2net_interface(model_file=args.local_model_path, use_relu=False)
     image_times = []
     top_neighbor_match = []
     local_matching_rate = []
@@ -597,6 +617,7 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
     mm = 'OpenCV' if args.local_matching_method == 'exact' else ('approx_torch' if torch.cuda.is_available() else 'approx_numpy')
     cuda = torch.cuda.is_available()
     matcher = LocalMatcher(args.ratio_thresh, mm, True)
+    desc_database_cursor = get_cursor(args.desc_database) if args.desc_database is not None else None
     print('Local feature matching and pose retrieval')
     for query_id, query_name in enumerate(query_images):
 
@@ -654,9 +675,16 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             query_kpts = kpts_to_cv(query_kpts)
         elif args.local_method == 'Superpoint':
             cv_img = cv2.imread(query_name, 0).astype(np.float32)/255.0
-            kpts, query_desc, _ = extractor.run(cv_img)
+            kpts, query_desc, _ = model.run(cv_img)
             query_desc = query_desc.T
             query_kpts = kpts_to_cv(kpts.T)
+        elif args.local_method == 'D2':
+            query_kpts, query_desc, _ =  model.extract_features(query_name, only_path=True)
+            #if 'ots' in args.local_model_path or 'no_photo' in args.local_model_path:
+            query_kpts = query_kpts[0]
+            query_desc = query_desc[0]
+            query_kpts = query_kpts[:,0:2]
+            query_kpts = kpts_to_cv(query_kpts)
         else:
             raise NotImplementedError('Local feature extraction method not implemented')
         t = time.time() - t
@@ -665,7 +693,7 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
 
         ## Matching
         t = time.time()
-        matched_pts_xyz, matched_keypoints, correct, incorrect = match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, extractor, matcher, refilter=args.no_refilter, double=args.bidirectional_filtering)
+        matched_pts_xyz, matched_keypoints, correct, incorrect = match_local(args, mm, query_desc, query_kpts, images, points3d, query_id, cluster_query, database_cursor, model, matcher, refilter=args.no_refilter, double=args.bidirectional_filtering, desc_database=desc_database_cursor)
         t = time.time() - t
         print_column_entry(' - Number of matched points', matched_keypoints.shape[0])
         
@@ -730,6 +758,11 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
             position = w_T_query[:3, 3]
             quat = list(Quaternion(matrix=query_T_w)) # rotmat2qvec(w_T_query[:3,:3])
             print_column_entry(' - Calculated position', position)
+        else:
+            #if not success:
+            #    warnings.warn('Localization not successful!')
+            errors.append(1000)    ## can be chosen arbitrarily
+            errors_rot.append(180) ## same here
 
         if args.verify is not None:
             gt = colmap_image_to_pose(images[abs(query_image_ids[query_id])])[:3,3]
@@ -749,12 +782,9 @@ def local_matching(args, points3d, images, database_cursor, query_cursor, img_cl
 
             #out_file.write('{} Error: {} CalcPos: {}\n'.format(name, error, position))
         else:
-            #if not success:
-            #    warnings.warn('Localization not successful!')
-            #position = -txq.rotate_vector(np.array(position), np.array(quat))
-            #out_file.write('{} {} {} {} {} {} {} {}\n'.format(name, quat[0], quat[1], quat[2], quat[3], position[0], position[1], position[2]))
-            errors.append(1000)    ## can be chosen arbitrarily
-            errors_rot.append(180) ## same here
+            if success:
+                position = -txq.rotate_vector(np.array(position), np.array(quat))
+                out_file.write('{} {} {} {} {} {} {} {}\n'.format(name, quat[0], quat[1], quat[2], quat[3], position[0], position[1], position[2]))
 
         individual_image_time = time.time() - individual_image_time 
         print_column_entry('Finished image {}/{}'.format(query_id+1, len(query_images)), time_to_str(individual_image_time))

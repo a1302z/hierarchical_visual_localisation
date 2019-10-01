@@ -6,10 +6,12 @@ import nearpy
 
 
 def to_unit_vector(x, method='approx_torch', cuda=False):
-    if method == 'approx_numpy':
+    if method == 'approx':
         return __to_unit_numpy__(x)
     elif method == 'approx_torch':
         return __to_unit_torch__(x, cuda)
+    else:
+        raise NotImplementedError('Method not implemented')
             
 def __to_unit_numpy__(x):
     return x.astype(np.float32)/np.linalg.norm(x.astype(np.float32),axis=-1, keepdims=True)
@@ -91,7 +93,7 @@ class LocalMatcher:
         if method == 'OpenCV':
             self.match = lambda x,y: self.__bf_matching__(x, y)
         elif method == 'approx':
-            self.match = lambda x,y: self.__approx_np__(x,y,unit_vectors)
+            self.match = lambda x,y: self.__approx_np__(y, x, unit_vectors)
         elif method == 'approx_torch':
             self.match = lambda x,y: self.__approx_torch__(x,y,torch.cuda.is_available(), unit_vectors)
         else:
@@ -116,7 +118,7 @@ class LocalMatcher:
     """
     An approximation that only considers direction of a feature vector but not its length
     """
-    def __approx_np__(self, x,y,is_unit_vector=False):
+    def __approx_np__(self, x, y, is_unit_vector=False):
         ##normalize
         if not is_unit_vector:
             x = __to_unit_numpy__(x)
