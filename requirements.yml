@@ -206,5 +206,4 @@ dependencies:
     - torch-spline-conv==1.1.0
     - torchsummary==1.5.1
     - transforms3d==0.3.1
-prefix: /usr/stud/zillera/anaconda3/envs/hfnet-pytorch
 
