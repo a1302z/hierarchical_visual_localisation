@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from sklearn.neighbors import NearestNeighbors
 import nearpy
+import tqdm
 
 
 def to_unit_vector(x, method='approx_torch', cuda=False):
@@ -29,7 +30,7 @@ class GlobalMatcher:
         if method == 'LSH':
             self.match = lambda x,y: self.__LSH__(x, y, buckets, n_neighbors)
         elif method == 'exact':
-            self.match = lambda x,y: self.__exact(x, y, n_neighbors)
+            self.match = lambda x,y: self.__exact__(x, y, n_neighbors)
         elif method == 'approx':
             self.match = lambda x,y: self.__approx__(y, x, n_neighbors, unit_vectors, torch.cuda.is_available())
         elif method == 'approx_cpu':
@@ -62,6 +63,7 @@ class GlobalMatcher:
         nbrs = NearestNeighbors(n_neighbors=n_neighbors).fit(global_features)
         distances, indices = nbrs.kneighbors(query_global_desc)
         return indices
+      
             
             
     def __LSH__(self, global_features, query_global_desc, buckets=5, n_neighbors=3):
@@ -70,15 +72,16 @@ class GlobalMatcher:
         for i, v in enumerate(global_features):
             engines[buckets].store_vector(v, '%d'%i)
         indices = []
-        for d in query_global_desc:
+        for d in tqdm.tqdm(query_global_desc, total=query_global_desc.shape[0]):
             nbr = engines[buckets].neighbours(d)
             if len(nbr) > (n_neighbors):
                 indices.append(np.array([int(n[1]) for n in nbr]))
             else:
                 b = buckets
-                while (len(nbr) <= n_neighbors):
+                while (len(nbr) <= n_neighbors and b > 1):
                     b = b // 2
                     if b not in engines:
+                        print('Create new engine with {:d} buckets'.format(b))
                         engines[b] = nearpy.Engine(global_features.shape[1], lshashes=[nearpy.hashes.RandomBinaryProjections('rbp', b)])
                         for i, v in enumerate(global_features):
                             engines[b].store_vector(v, '%d'%i)
