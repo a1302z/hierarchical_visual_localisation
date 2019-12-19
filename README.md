@@ -51,6 +51,24 @@ Evaluated using following hardware:
  | Mean time / img   | <1 seconds | 3 seconds  |
  | Median time / img | <1 seconds | 3 seconds  |
  | Max time / img    | 2 seconds  | 14 seconds |
+ 
+## Get started
+Prerequisites: 
+ - Install [conda](https://docs.anaconda.com/anaconda/install/)
+ - Download [AachenDayNight dataset](https://drive.google.com/drive/folders/1a4qf-ZVsuGF96xsG8_GEgo-ifcAtZMPE)
+ - (Optional) Install [Colmap](https://demuc.de/colmap/)
+ 
+Example for start on Linux
+```
+git clone https://github.com/a1302z/hierarchical_visual_localisation.git
+cd hierarchical_visual_localisation
+conda env create -f requirements.yml
+mkdir data
+cd data
+wget https://syncandshare.lrz.de/dl/fiQXCXZ9ibmrm7rwUJzAvNL4
+cd ..
+mv <path to AachenDayNight dataset> data/
+```
 
 ## Credits
 The concept of hierarchical localisation was introduced in this [paper](https://arxiv.org/abs/1809.01019).
