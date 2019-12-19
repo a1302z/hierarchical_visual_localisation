@@ -1,27 +1,35 @@
 # Hierarchical visual localization pipeline
+This work was done during my [master's thesis](https://syncandshare.lrz.de/dl/fiQXZ8DuirBgMeM9iJJaKFQ3/?inline) under [Prof. Leal-Taixe](https://dvl.in.tum.de/team/lealtaixe/) and [Qunjie Zhou](https://dvl.in.tum.de/team/zhouq/). 
+
 Visual localization pipeline using following steps
 1) Find similar database images (neighbors) by using global descriptors
+![Neighbor images](figures/neighbors.png)
 2) Extract local descriptors from neighboring database and query image
 3) Match local descriptors
+![Matching](figures/matching.png)
 4) Calculate 6-DoF pose using RANSAC scheme
 
-## Credits
-### Idea
-Hierarchical localization was introduced in this [paper](https://arxiv.org/abs/1812.03506)
+| ![Overall concept](figures/concept.png) |
+|:--:|
+|Overall concept|
 
-### Code
-We reused code from the following repositories.
-- [HF-Net](https://www.github.com/ethz-asl/hfnet)
-- [Pytorch NetVLAD](http://www.robots.ox.ac.uk/~albanie/pytorch-models.html)
-- [CNN Image Retrieval](https://github.com/filipradenovic/cnnimageretrieval-pytorch)
-- [Superpoint](https://github.com/MagicLeapResearch/SuperPointPretrainedNetwork)
 
 ## Current performance
 ### Results
-Evaluation via [online evaluation system](https://www.visuallocalization.net)  
-[Benchmark results](https://www.visuallocalization.net/benchmark/)  
+Evaluation via [online evaluation system](https://www.visuallocalization.net) with [benchmark results](https://www.visuallocalization.net/benchmark/) available.
 
-| Cirtorch/Colmap  | Day  | Night |
+
+
+| GeM / Superpoint    | Day  | Night |
+|---------------------|------|-------|
+| High precision      | 71.0 | 31.6  |
+| Medium precision    | 79.5 | 46.9  |
+| Coarse precision    | 90.0 | 65.3  |
+
+``` python evaluate.py --ratio_thresh 0.8 --reproj_error 14.0 --n_neighbors 20 --global_method Cirtorch --local_method Superpoint ```
+
+
+| GeM / SIFT       | Day  | Night |
 |------------------|------|-------|
 |  High precision  | 76.3 | 19.4  |
 | Medium precision | 83.7 | 28.6  |
@@ -30,14 +38,7 @@ Evaluation via [online evaluation system](https://www.visuallocalization.net)
 Command to reproduce result:  
 ``` python evaluate.py --ratio_thresh 0.75 --n_neighbors 20 --global_method Cirtorch ```
 
-
-| Cirtorch/Superpoint | Day  | Night |
-|---------------------|------|-------|
-| High precision      | 61.4 | 31.6  |
-| Medium precision    | 77.3 | 49.0  |
-| Coarse precision    | 88.6 | 61.2  |
-
-``` python evaluate.py --ratio_thresh 0.75 --n_neighbors 20 --global_method Cirtorch --local_method Superpoint ```
+To use artificial night images mentioned in thesis you can download them [here](https://syncandshare.lrz.de/dl/fiDymBjT43QSsJTqueiLo1S2)
 
 ### Speed
 Evaluated using following hardware:
@@ -50,3 +51,16 @@ Evaluated using following hardware:
  | Mean time / img   | <1 seconds | 3 seconds  |
  | Median time / img | <1 seconds | 3 seconds  |
  | Max time / img    | 2 seconds  | 14 seconds |
+
+## Credits
+The concept of hierarchical localisation was introduced in this [paper](https://arxiv.org/abs/1809.01019).
+
+We used code from the following repositories.
+- [HF-Net](https://www.github.com/ethz-asl/hfnet)
+- [Pytorch NetVLAD](http://www.robots.ox.ac.uk/~albanie/pytorch-models.html)
+- [CNN Image Retrieval (GeM)](https://github.com/filipradenovic/cnnimageretrieval-pytorch)
+- [Superpoint](https://github.com/MagicLeapResearch/SuperPointPretrainedNetwork)
+- [D2-Net](https://github.com/mihaidusmanu/d2-net)
+- [PyTorch geometric](https://github.com/rusty1s/pytorch_geometric)
+
+If we missed any credits please let us know.
